@@ -8,13 +8,17 @@
 #include "harnack.h"
 #include "utils.h"
 
-polyscope::PointCloud* psCloud;
-
+//====== Scene parameters
 float s = 0.5;
 std::vector<float3> pts{float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1},
                         float3{1, -s, -1}};
 std::vector<uint3> loops{uint3{0, 4, 0}};
+float tmin = 0, tmax = 10;
+int max_iterations = 2500;
 
+polyscope::PointCloud* psCloud;
+
+//====== Helpers
 float3 to_float3(glm::vec3 v) { return make_float3(v.x, v.y, v.z); }
 glm::vec3 to_vec3(float3 v) { return glm::vec3{v.x, v.y, v.z}; }
 
@@ -23,8 +27,8 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
     solid_angle_intersection_params sa_params;
     sa_params.ray_P                = to_float3(ro);
     sa_params.ray_D                = to_float3(rd);
-    sa_params.ray_tmin             = 0;
-    sa_params.ray_tmax             = 5;
+    sa_params.ray_tmin             = tmin;
+    sa_params.ray_tmax             = tmax;
     sa_params.loops                = loops.data();
     sa_params.pts                  = pts.data();
     sa_params.n_loops              = 1;
@@ -33,7 +37,7 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
     sa_params.frequency            = 0;
     sa_params.solid_angle_formula  = 0;
     sa_params.use_grad_termination = true;
-    sa_params.max_iterations       = 2500;
+    sa_params.max_iterations       = max_iterations;
     sa_params.clip_y               = false;
     sa_params.capture_misses       = false;
 
@@ -53,29 +57,35 @@ std::ostream& operator<<(std::ostream& out, const glm::vec3& vec) {
     return out;
 }
 
+//====== Experiment code
+polyscope::CameraParameters camParams;
 void shootCameraRays(size_t N = 50) {
-    glm::mat4 camView    = polyscope::view::getCameraViewMatrix();
+    camParams = polyscope::view::getCameraParametersForCurrentView();
+    glm::vec3 lookDir, upDir, rightDir;
+    polyscope::view::getCameraFrame(lookDir, upDir, rightDir);
     glm::vec3 camPos     = polyscope::view::getCameraWorldPosition();
     double fovY          = 50.0;
     glm::vec2 tanHalfFov = glm::vec2(tan(radians(fovY) * 0.5));
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
+    std::vector<std::array<size_t, 2>> viewRayLines;
     std::vector<float> omegas;
     float s = 0.05;
     intersections.reserve(N * N);
+    viewRayPts.push_back(camPos);
     for (size_t iX = 0; iX < N; iX++) {
         for (size_t iY = 0; iY < N; iY++) {
 
             glm::vec2 cCoord =
                 glm::vec2{iX, iY} / (float)(N - 1) * (float)2 - (float)1;
-            glm::vec3 vDir = normalize(glm::vec3(cCoord * tanHalfFov, -1.0));
 
             // create view ray
-            glm::vec3 rd = glm::vec3(camView * glm::vec4(vDir, 0.0));
+            glm::vec3 rd = normalize(cCoord.x * rightDir + cCoord.y * upDir +
+                                     (float)2 * lookDir);
             glm::vec3 ro = camPos;
 
-            viewRayPts.push_back(ro);
-            viewRayPts.push_back(ro + (float)5 * rd);
+            viewRayLines.push_back({0, viewRayPts.size()});
+            viewRayPts.push_back(ro + tmax * rd);
 
             float t, omega, iter_frac;
             bool hit = intersect(ro, rd, &t, &iter_frac, &omega);
@@ -93,7 +103,9 @@ void shootCameraRays(size_t N = 50) {
     psCloud->addScalarQuantity("omega", omegas);
     psCloud->addVectorQuantity("normal", normals);
 
-    polyscope::registerCurveNetworkSegments("view rays", viewRayPts);
+    polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
+        ->setEnabled(false);
+    polyscope::registerPointCloud("view ray points", viewRayPts);
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -103,12 +115,21 @@ void myCallback() {
     if (ImGui::Button("Shoot Camera Rays")) {
         shootCameraRays();
     }
+    if (ImGui::Button("Restore Camera View")) {
+        polyscope::view::setViewToCamera(camParams);
+    }
+
+    ImGui::Separator();
+    ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
+    ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
+    ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 10000);
 }
 
 int main(int argc, char** argv) {
 
     // Configure the argument parser
     args::ArgumentParser parser("Harnack debugger");
+    polyscope::options::programName = "Harnack Debugger";
 
     // Parse args
     try {
