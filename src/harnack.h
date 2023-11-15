@@ -717,13 +717,13 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                        "iterations.\n");
             }
 
+            *isect_t = t;
+            *isect_v = ((T)iter) / ((T)params.max_iterations);
             if (params.capture_misses) {
                 T3 pos = fma(ray_P, t, ray_D);
                 T3 grad{0, 0, 0};
                 T omega  = total_solid_angle(pos, grad);
-                *isect_t = t;
                 *isect_u = omega / static_cast<T>(4. * M_PI);
-                *isect_v = ((T)iter) / ((T)params.max_iterations);
                 return true;
             } else {
                 return false;
@@ -782,13 +782,13 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         iter++;
     }
 
+    *isect_t = t;
+    *isect_v = ((T)iter) / ((T)params.max_iterations);
     if (params.capture_misses) {
         T3 pos = fma(ray_P, t, ray_D);
         T3 grad{0, 0, 0};
         T omega  = total_solid_angle(pos, grad);
-        *isect_t = t;
         *isect_u = omega / static_cast<T>(4. * M_PI);
-        *isect_v = ((T)iter) / ((T)params.max_iterations);
         return true;
     } else {
         return false;

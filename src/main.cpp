@@ -15,6 +15,7 @@ std::vector<float3> pts{float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1},
 std::vector<uint3> loops{uint3{0, 4, 0}};
 float tmin = 0, tmax = 10;
 int max_iterations = 2500;
+int resolution     = 50;
 
 polyscope::PointCloud* psCloud;
 
@@ -69,10 +70,11 @@ void shootCameraRays(size_t N = 50) {
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
     std::vector<std::array<size_t, 2>> viewRayLines;
-    std::vector<float> omegas;
+    std::vector<float> omegas, iterationCounts;
     float s = 0.05;
     intersections.reserve(N * N);
     viewRayPts.push_back(camPos);
+    iterationCounts.push_back(0);
     for (size_t iX = 0; iX < N; iX++) {
         for (size_t iY = 0; iY < N; iY++) {
 
@@ -97,6 +99,8 @@ void shootCameraRays(size_t N = 50) {
                 omegas.push_back(omega);
                 normals.push_back(normal(intersections.back()));
             }
+
+            iterationCounts.push_back(iter_frac * max_iterations);
         }
     }
     psCloud = polyscope::registerPointCloud("intersections", intersections);
@@ -105,7 +109,10 @@ void shootCameraRays(size_t N = 50) {
 
     polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
         ->setEnabled(false);
-    polyscope::registerPointCloud("view ray points", viewRayPts);
+    auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
+    viewPts->addScalarQuantity("iteration counts", iterationCounts)
+        ->setEnabled(true);
+    viewPts->setPointRenderMode(polyscope::PointRenderMode::Quad);
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -113,7 +120,7 @@ void shootCameraRays(size_t N = 50) {
 // https://github.com/ocornut/imgui/blob/master/imgui.h
 void myCallback() {
     if (ImGui::Button("Shoot Camera Rays")) {
-        shootCameraRays();
+        shootCameraRays(resolution);
     }
     if (ImGui::Button("Restore Camera View")) {
         polyscope::view::setViewToCamera(camParams);
@@ -123,6 +130,7 @@ void myCallback() {
     ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
     ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
     ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 10000);
+    ImGui::DragInt("resolution", &resolution, 1, 1, 500);
 }
 
 int main(int argc, char** argv) {
