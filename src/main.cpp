@@ -13,9 +13,11 @@ float s = 0.5;
 std::vector<float3> pts{float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1},
                         float3{1, -s, -1}};
 std::vector<uint3> loops{uint3{0, 4, 0}};
-float tmin = 0, tmax = 10;
-int max_iterations = 2500;
-int resolution     = 50;
+
+float tmin = 0, tmax = 10, epsilon = .001;
+int max_iterations        = 2500;
+int resolution            = 200;
+bool use_grad_termination = true;
 
 polyscope::PointCloud* psCloud;
 
@@ -33,11 +35,11 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
     sa_params.loops                = loops.data();
     sa_params.pts                  = pts.data();
     sa_params.n_loops              = 1;
-    sa_params.epsilon              = .001;
+    sa_params.epsilon              = epsilon;
     sa_params.levelset             = 2. * M_PI;
     sa_params.frequency            = 0;
     sa_params.solid_angle_formula  = 0;
-    sa_params.use_grad_termination = true;
+    sa_params.use_grad_termination = use_grad_termination;
     sa_params.max_iterations       = max_iterations;
     sa_params.clip_y               = false;
     sa_params.capture_misses       = false;
@@ -71,10 +73,12 @@ void shootCameraRays(size_t N = 50) {
     std::vector<glm::vec3> intersections, normals, viewRayPts;
     std::vector<std::array<size_t, 2>> viewRayLines;
     std::vector<float> omegas, iterationCounts;
+    std::vector<char> didHit;
     float s = 0.05;
     intersections.reserve(N * N);
     viewRayPts.push_back(camPos);
     iterationCounts.push_back(0);
+    didHit.push_back(false);
     for (size_t iX = 0; iX < N; iX++) {
         for (size_t iY = 0; iY < N; iY++) {
 
@@ -83,7 +87,7 @@ void shootCameraRays(size_t N = 50) {
 
             // create view ray
             glm::vec3 rd = normalize(cCoord.x * rightDir + cCoord.y * upDir +
-                                     (float)2 * lookDir);
+                                     (float)3 * lookDir);
             glm::vec3 ro = camPos;
 
             viewRayLines.push_back({0, viewRayPts.size()});
@@ -101,6 +105,7 @@ void shootCameraRays(size_t N = 50) {
             }
 
             iterationCounts.push_back(iter_frac * max_iterations);
+            didHit.push_back(hit);
         }
     }
     psCloud = polyscope::registerPointCloud("intersections", intersections);
@@ -110,9 +115,20 @@ void shootCameraRays(size_t N = 50) {
     polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
         ->setEnabled(false);
     auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
+    viewPts->addScalarQuantity("did hit", didHit);
     viewPts->addScalarQuantity("iteration counts", iterationCounts)
         ->setEnabled(true);
     viewPts->setPointRenderMode(polyscope::PointRenderMode::Quad);
+
+    float meanIterations =
+        std::accumulate(iterationCounts.begin(), iterationCounts.end(), 0.) /
+        (iterationCounts.size() - 1.);
+    float maxIterations =
+        *std::max_element(iterationCounts.begin(), iterationCounts.end());
+
+    std::cout << "==== Stats    " << vendl;
+    std::cout << "  mean iterations: " << meanIterations << vendl;
+    std::cout << "   max iterations: " << maxIterations << vendl;
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -127,10 +143,13 @@ void myCallback() {
     }
 
     ImGui::Separator();
+    ImGui::SliderFloat("epsilon (log)", &epsilon, .000001f, .01f, "%.4f",
+                       ImGuiSliderFlags_Logarithmic);
     ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
     ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
-    ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 10000);
+    ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 50000);
     ImGui::DragInt("resolution", &resolution, 1, 1, 500);
+    ImGui::Checkbox("use_grad_termination", &use_grad_termination);
 }
 
 int main(int argc, char** argv) {

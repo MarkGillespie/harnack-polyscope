@@ -326,12 +326,12 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
             // Store displacements from center
             std::vector<T3> rx;
             rx.reserve(N);
-            for (int i = 0; i < N; i++)
+            for (uint i = 0; i < N; i++)
                 rx.push_back(diff_f(params.pts[iStart + i], center));
 
             // Test if points are equidistant from center, and store radius
             radius = len(rx[0]);
-            for (int i = 1; i < N; i++) {
+            for (uint i = 1; i < N; i++) {
                 T radius_i = len(rx[i]);
                 if (std::abs(radius_i - radius) >= 0.01) {
                     isCircular = false;
@@ -343,7 +343,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                 // Test if points are coplanar (and store normal)
                 normal = cross(rx[0], rx[1]);
                 normalize(normal);
-                for (int i = 1; i < N; i++) {
+                for (uint i = 1; i < N; i++) {
                     int j       = (i + 1) % N;
                     T3 normal_i = cross(rx[i], rx[j]);
 
@@ -397,7 +397,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         T min_d2         = infinity;
 
         // compute closest distance to each polygon line segment
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             T3 p1 = from_float3(params.pts[iStart + i]);
             T3 p2 = from_float3(params.pts[iStart + (i + 1) % N]);
             T3 m  = diff(p2, p1);
@@ -468,14 +468,14 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         xp.reserve(N + 1);
         std::vector<T> Lp;
         Lp.reserve(N + 1);
-        for (int i = 0; i < N + 1; i++) { // center = pts[N]
+        for (uint i = 0; i < N + 1; i++) { // center = pts[N]
             xp.push_back(diff_f(params.pts[iStart + i], x));
             Lp.push_back(len(xp[i]));
         }
 
         // Iterate over triangles used to triangulate the polygon
         std::complex<T> running_angle{1., 0.};
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             int a = i;
             int b = (i + 1) % N;
             int c = N;
@@ -525,7 +525,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         xp.reserve(N);
         std::vector<T> Lp;
         Lp.reserve(N);
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             xp.push_back(diff_f(params.pts[iStart + i], x));
             Lp.push_back(len(xp[i]));
         }
@@ -534,7 +534,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         T4 q0     = dihedral(T3{1., 0., 0.},
                              xp[start]); // point in fiber of points[start]-x
         T4 qi     = q0;
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             int a = i;
             int b = (i + 1) % N;
             T4 d  = dihedral(xp[a], xp[b]);
@@ -577,14 +577,14 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         xp.reserve(N);
         std::vector<T> Lp;
         Lp.reserve(N);
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             xp.push_back(diff_f(params.pts[iStart + i], x));
             Lp.push_back(len(xp[i]));
         }
 
         // Iterate over triangles used to triangulate the polygon
         T total_angle = 0.;
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             int a     = (i + N - 1) % N;
             int b     = i;
             int c     = (i + 1) % N;
@@ -843,12 +843,12 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
             // Store displacements from center
             std::vector<T3> rx;
             rx.reserve(N);
-            for (int i = 0; i < N; i++)
+            for (uint i = 0; i < N; i++)
                 rx.push_back(diff_f(pts[iStart + i], center));
 
             // Test if points are equidistant from center, and store radius
             radius = len(rx[0]);
-            for (int i = 1; i < N; i++) {
+            for (uint i = 1; i < N; i++) {
                 T radius_i = len(rx[i]);
                 if (std::abs(radius_i - radius) >= 0.01) {
                     isCircular = false;
@@ -860,7 +860,7 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
                 // Test if points are coplanar (and store normal)
                 normal = cross(rx[0], rx[1]);
                 normalize(normal);
-                for (int i = 1; i < N; i++) {
+                for (uint i = 1; i < N; i++) {
                     int j       = (i + 1) % N;
                     T3 normal_i = cross(rx[i], rx[j]);
 
@@ -897,14 +897,14 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
         xp.reserve(N + 1);
         std::vector<T> Lp;
         Lp.reserve(N + 1);
-        for (int i = 0; i < N + 1; i++) { // center = pts[N]
+        for (uint i = 0; i < N + 1; i++) { // center = pts[N]
             xp.push_back(diff_f(pts[iStart + i], x));
             Lp.push_back(len(xp[i]));
         }
 
         // Iterate over triangles used to triangulate the polygon
         std::complex<T> running_angle{1., 0.};
-        for (int i = 0; i < N; i++) {
+        for (uint i = 0; i < N; i++) {
             int a = i;
             int b = (i + 1) % N;
             int c = N;
