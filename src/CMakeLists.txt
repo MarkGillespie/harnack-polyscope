@@ -9,6 +9,7 @@ add_executable(
   run
   main.cpp
   utils.cpp
+  math_elliptic_integral.cpp
 )
 target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 # borrow args.hxx directly from polyscope
