@@ -71,14 +71,12 @@ void shootCameraRays(size_t N = 50) {
     glm::vec2 tanHalfFov = glm::vec2(tan(radians(fovY) * 0.5));
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
-    std::vector<std::array<size_t, 2>> viewRayLines;
+    // std::vector<std::array<size_t, 2>> viewRayLines;
     std::vector<float> omegas, iterationCounts;
     std::vector<char> didHit;
     float s = 0.05;
     intersections.reserve(N * N);
-    viewRayPts.push_back(camPos);
-    iterationCounts.push_back(0);
-    didHit.push_back(false);
+    double start = std::clock();
     for (size_t iX = 0; iX < N; iX++) {
         for (size_t iY = 0; iY < N; iY++) {
 
@@ -90,7 +88,7 @@ void shootCameraRays(size_t N = 50) {
                                      (float)3 * lookDir);
             glm::vec3 ro = camPos;
 
-            viewRayLines.push_back({0, viewRayPts.size()});
+            // viewRayLines.push_back({0, viewRayPts.size()});
             viewRayPts.push_back(ro + tmax * rd);
 
             float t, omega, iter_frac;
@@ -108,12 +106,15 @@ void shootCameraRays(size_t N = 50) {
             didHit.push_back(hit);
         }
     }
+    double duration = (std::clock() - start) / (double)CLOCKS_PER_SEC;
+    double meanTime = duration / viewRayPts.size();
+
     psCloud = polyscope::registerPointCloud("intersections", intersections);
     psCloud->addScalarQuantity("omega", omegas);
     psCloud->addVectorQuantity("normal", normals);
 
-    polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
-        ->setEnabled(false);
+    // polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
+    //     ->setEnabled(false);
     auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
     viewPts->addScalarQuantity("did hit", didHit);
     viewPts->addScalarQuantity("iteration counts", iterationCounts)
@@ -122,13 +123,14 @@ void shootCameraRays(size_t N = 50) {
 
     float meanIterations =
         std::accumulate(iterationCounts.begin(), iterationCounts.end(), 0.) /
-        (iterationCounts.size() - 1.);
+        iterationCounts.size();
     float maxIterations =
         *std::max_element(iterationCounts.begin(), iterationCounts.end());
 
     std::cout << "==== Stats    " << vendl;
     std::cout << "  mean iterations: " << meanIterations << vendl;
     std::cout << "   max iterations: " << maxIterations << vendl;
+    std::cout << "        mean time: " << meanTime << " s" << vendl;
 }
 
 // A user-defined callback, for creating control panels (etc)
