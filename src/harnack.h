@@ -265,13 +265,21 @@ typedef struct solid_angle_intersection_params {
     int max_iterations;
     bool clip_y;
     bool capture_misses;
+    bool use_overstepping;
 } solid_angle_intersection_params;
+
+typedef struct acceleration_stats {
+    int total_iterations     = 0;
+    int successful_oversteps = 0;
+    int failed_oversteps     = 0;
+} acceleration_stats;
 
 static bool printed_disk_normal = false;
 template <typename T>
 ccl_device bool ray_nonplanar_polygon_intersect_T(
     const solid_angle_intersection_params& params, ccl_private float* isect_u,
-    ccl_private float* isect_v, ccl_private float* isect_t) {
+    ccl_private float* isect_v, ccl_private float* isect_t,
+    acceleration_stats* stats) {
     using T3         = std::array<T, 3>;
     using T4         = std::array<T, 4>;
     auto from_float3 = [](const float3& p) -> T3 {
@@ -704,9 +712,17 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
     T ld = len(ray_D);
 
+    auto report_stats = [&]() {
+        if (stats) {
+            stats->total_iterations = iter;
+        }
+    };
+
+    T t_overstep = 0;
+
     static bool exceeded_max = false;
     while (t < ray_tmax) {
-        T3 pos = fma(ray_P, t, ray_D);
+        T3 pos = fma(ray_P, t + t_overstep, ray_D);
 
         // If we've exceeded the maximum number of iterations,
         // print a warning
@@ -719,6 +735,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
             *isect_t = t;
             *isect_v = ((T)iter) / ((T)params.max_iterations);
+            report_stats();
             if (params.capture_misses) {
                 T3 pos = fma(ray_P, t, ray_D);
                 T3 grad{0, 0, 0};
@@ -765,25 +782,35 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         T3 closestPoint;
         T R = distance_to_boundary(pos, &closestPoint);
 
-        // If we're close enough to the level set, or we've exceeded the
-        // maximum number of iterations, assume there's a hit.
-        if (close_to_zero(val, lo_bound, hi_bound, grad) || R < epsilon ||
-            iter > params.max_iterations) {
-            // if (R < epsilon)   grad = pos - closestPoint; // TODO: this?
-            *isect_t = t;
-            *isect_u = omega / static_cast<T>(4. * M_PI);
-            *isect_v = ((T)iter) / ((T)params.max_iterations);
-            return true;
-        }
-
         // Compute a conservative step size based on the Harnack bound.
-        T r = get_max_step(val, R, lo_bound, hi_bound, shift);
-        t += r / ld;
+        T r = get_max_step(val, R, lo_bound, hi_bound, shift) / ld;
+
+        if (r >= t_overstep) { // commit to step
+            // If we're close enough to the level set, or we've exceeded the
+            // maximum number of iterations, assume there's a hit.
+            if (close_to_zero(val, lo_bound, hi_bound, grad) || R < epsilon ||
+                iter > params.max_iterations) {
+                // if (R < epsilon)   grad = pos - closestPoint; // TODO: this?
+                *isect_t = t;
+                *isect_u = omega / static_cast<T>(4. * M_PI);
+                *isect_v = ((T)iter) / ((T)params.max_iterations);
+                report_stats();
+                return true;
+            }
+
+            t += r;
+            if (params.use_overstepping) t_overstep = r * .75;
+            if (params.use_overstepping && stats) stats->successful_oversteps++;
+        } else { // step back and try again
+            t_overstep = 0;
+            if (stats) stats->failed_oversteps++;
+        }
         iter++;
     }
 
     *isect_t = t;
     *isect_v = ((T)iter) / ((T)params.max_iterations);
+    report_stats();
     if (params.capture_misses) {
         T3 pos = fma(ray_P, t, ray_D);
         T3 grad{0, 0, 0};

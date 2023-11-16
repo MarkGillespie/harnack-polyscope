@@ -18,6 +18,7 @@ float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
 int resolution            = 200;
 bool use_grad_termination = true;
+bool use_overstepping     = false;
 
 polyscope::PointCloud* psCloud;
 
@@ -26,7 +27,7 @@ float3 to_float3(glm::vec3 v) { return make_float3(v.x, v.y, v.z); }
 glm::vec3 to_vec3(float3 v) { return glm::vec3{v.x, v.y, v.z}; }
 
 bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
-               float* omega) {
+               float* omega, acceleration_stats* stats) {
     solid_angle_intersection_params sa_params;
     sa_params.ray_P                = to_float3(ro);
     sa_params.ray_D                = to_float3(rd);
@@ -43,9 +44,10 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
     sa_params.max_iterations       = max_iterations;
     sa_params.clip_y               = false;
     sa_params.capture_misses       = false;
+    sa_params.use_overstepping     = use_overstepping;
 
     return ray_nonplanar_polygon_intersect_T<double>(sa_params, omega,
-                                                     iter_frac, t);
+                                                     iter_frac, t, stats);
 }
 
 glm::vec3 normal(glm::vec3 pos) {
@@ -72,7 +74,7 @@ void shootCameraRays(size_t N = 50) {
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
     // std::vector<std::array<size_t, 2>> viewRayLines;
-    std::vector<float> omegas, iterationCounts;
+    std::vector<float> omegas, iterationCounts, overstep_success_rate;
     std::vector<char> didHit;
     float s = 0.05;
     intersections.reserve(N * N);
@@ -92,7 +94,8 @@ void shootCameraRays(size_t N = 50) {
             viewRayPts.push_back(ro + tmax * rd);
 
             float t, omega, iter_frac;
-            bool hit = intersect(ro, rd, &t, &iter_frac, &omega);
+            acceleration_stats stats;
+            bool hit = intersect(ro, rd, &t, &iter_frac, &omega, &stats);
 
             if (hit) {
                 glm::vec3 intersection = ro + t * rd;
@@ -102,7 +105,9 @@ void shootCameraRays(size_t N = 50) {
                 normals.push_back(normal(intersections.back()));
             }
 
-            iterationCounts.push_back(iter_frac * max_iterations);
+            iterationCounts.push_back(stats.total_iterations);
+            overstep_success_rate.push_back((double)stats.successful_oversteps /
+                                            (double)stats.total_iterations);
             didHit.push_back(hit);
         }
     }
@@ -117,8 +122,8 @@ void shootCameraRays(size_t N = 50) {
     //     ->setEnabled(false);
     auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
     viewPts->addScalarQuantity("did hit", didHit);
-    viewPts->addScalarQuantity("iteration counts", iterationCounts)
-        ->setEnabled(true);
+    viewPts->addScalarQuantity("overstep success rate", overstep_success_rate);
+    viewPts->addScalarQuantity("iteration counts", iterationCounts);
     viewPts->setPointRenderMode(polyscope::PointRenderMode::Quad);
 
     float meanIterations =
@@ -126,11 +131,17 @@ void shootCameraRays(size_t N = 50) {
         iterationCounts.size();
     float maxIterations =
         *std::max_element(iterationCounts.begin(), iterationCounts.end());
+    float meanOverstepSuccessRate =
+        std::accumulate(overstep_success_rate.begin(),
+                        overstep_success_rate.end(), 0.) /
+        overstep_success_rate.size();
 
     std::cout << "==== Stats    " << vendl;
-    std::cout << "  mean iterations: " << meanIterations << vendl;
-    std::cout << "   max iterations: " << maxIterations << vendl;
-    std::cout << "        mean time: " << meanTime << " s" << vendl;
+    std::cout << "        mean iterations: " << meanIterations << vendl;
+    std::cout << "         max iterations: " << maxIterations << vendl;
+    std::cout << "  overstep success rate: " << meanOverstepSuccessRate
+              << vendl;
+    std::cout << "              mean time: " << meanTime << " s" << vendl;
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -152,6 +163,7 @@ void myCallback() {
     ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 50000);
     ImGui::DragInt("resolution", &resolution, 1, 1, 500);
     ImGui::Checkbox("use_grad_termination", &use_grad_termination);
+    ImGui::Checkbox("use_overstepping", &use_overstepping);
 }
 
 int main(int argc, char** argv) {
