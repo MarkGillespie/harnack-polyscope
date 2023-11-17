@@ -167,7 +167,7 @@ void shootCameraRays(size_t N = 50, std::string name = "default") {
     float mean_steps_after_epsilon_loose = mean(steps_after_epsilon_loose);
     float mean_newton_steps              = mean(newton_steps);
 
-    std::cout << "==== Stats    " << vendl;
+    std::cout << "==== Stats (" << name << ")    " << vendl;
     std::cout << "           mean iterations: " << meanIterations << vendl;
     std::cout << "            max iterations: " << maxIterations << vendl;
     std::cout << "     overstep success rate: " << meanOverstepSuccessRate
@@ -222,7 +222,7 @@ void print_test_results() {
             //           << stats.extrapolation_times[iI]
             //           << "  ve = " << std::setw(8)
             //           << stats.extrapolation_values[iI]
-            //           << "  vt = " << std::setw(8) << stats.true_values[iI]
+            //           << "  VT = " << std::setw(8) << stats.true_values[iI]
             //           << "  a  = " << std::setw(8) << stats.as[iI]
             //           << "  b  = " << std::setw(8) << stats.bs[iI];
             //=== newton
@@ -245,7 +245,13 @@ void print_test_results() {
 // https://github.com/ocornut/imgui/blob/master/imgui.h
 void myCallback() {
     if (ImGui::Button("Shoot Camera Rays")) {
-        std::string name = (use_overstepping ? "overstep" : "normalstep");
+        std::string name =
+            std::string(use_grad_termination ? "grad-terminated " : "") +
+            std::string(use_overstepping ? "overstepped " : "") +
+            std::string(use_extrapolation ? "extrapolated " : "") +
+            std::string(use_newton ? "newton-accelerated " : "");
+        if (name.length() == 0) name = "default ";
+        name = name.substr(0, name.size() - 1); // trim trailing space
         shootCameraRays(resolution, name);
     }
     if (ImGui::Button("Restore Camera View")) {

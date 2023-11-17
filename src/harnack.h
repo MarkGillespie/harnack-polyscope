@@ -737,7 +737,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
     T t_prev = -1, val_prev = 0;
     static bool exceeded_max = false;
-    bool past_epsilon_loose  = false;
+    bool inside_loose_shell  = false;
     while (t < ray_tmax) {
         T3 pos = fma(ray_P, t + t_overstep, ray_D);
 
@@ -824,8 +824,9 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
             if (close_to_zero(val, lo_bound, hi_bound, params.epsilon_loose,
                               grad)) {
-                past_epsilon_loose = true;
-                if (params.use_newton) {
+                // try newton's method when you first enter the epsilon_loose
+                // shell
+                if (params.use_newton && !inside_loose_shell) {
 
                     auto f = [&](T t) -> T { // also updates grad
                         T3 pos  = fma(ray_P, t + t_overstep, ray_D);
@@ -864,6 +865,9 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                     // TODO: really, you should keep going here if not close to
                     // zero
                 }
+                inside_loose_shell = true;
+            } else {
+                inside_loose_shell = false;
             }
 
             if (params.use_extrapolation) {
@@ -911,7 +915,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
             if (stats) stats->failed_oversteps++;
         }
         iter++;
-        if (past_epsilon_loose && stats) stats->n_steps_after_eps++;
+        if (inside_loose_shell && stats) stats->n_steps_after_eps++;
     }
 
     *isect_t = t;
