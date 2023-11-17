@@ -16,9 +16,11 @@ std::vector<uint3> loops{uint3{0, 4, 0}};
 
 float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
-int resolution            = 200;
+int resolution            = 1;
 bool use_grad_termination = true;
 bool use_overstepping     = false;
+bool use_extrapolation    = false;
+bool use_newton           = false;
 
 polyscope::PointCloud* psCloud;
 
@@ -45,6 +47,9 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
     sa_params.clip_y               = false;
     sa_params.capture_misses       = false;
     sa_params.use_overstepping     = use_overstepping;
+    sa_params.use_extrapolation    = use_extrapolation;
+    sa_params.use_newton           = use_newton;
+    sa_params.epsilon_loose        = sqrt(epsilon);
 
     return ray_nonplanar_polygon_intersect_T<double>(sa_params, omega,
                                                      iter_frac, t, stats);
@@ -63,8 +68,9 @@ std::ostream& operator<<(std::ostream& out, const glm::vec3& vec) {
 }
 
 //====== Experiment code
+std::map<std::string, acceleration_stats> test_results;
 polyscope::CameraParameters camParams;
-void shootCameraRays(size_t N = 50) {
+void shootCameraRays(size_t N = 50, std::string name = "default") {
     camParams = polyscope::view::getCameraParametersForCurrentView();
     glm::vec3 lookDir, upDir, rightDir;
     polyscope::view::getCameraFrame(lookDir, upDir, rightDir);
@@ -73,24 +79,28 @@ void shootCameraRays(size_t N = 50) {
     glm::vec2 tanHalfFov = glm::vec2(tan(radians(fovY) * 0.5));
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
-    // std::vector<std::array<size_t, 2>> viewRayLines;
-    std::vector<float> omegas, iterationCounts, overstep_success_rate;
+    std::vector<std::array<size_t, 2>> viewRayLines;
+    std::vector<float> omegas, iterationCounts, overstep_success_rate,
+        steps_after_epsilon_loose, newton_steps;
     std::vector<char> didHit;
-    float s = 0.05;
+    size_t successful_extrapolations = 0;
+    float s                          = 0.05;
     intersections.reserve(N * N);
     double start = std::clock();
     for (size_t iX = 0; iX < N; iX++) {
         for (size_t iY = 0; iY < N; iY++) {
 
             glm::vec2 cCoord =
-                glm::vec2{iX, iY} / (float)(N - 1) * (float)2 - (float)1;
+                (N <= 1)
+                    ? glm::vec2{0, 0}
+                    : glm::vec2{iX, iY} / (float)(N - 1) * (float)2 - (float)1;
 
             // create view ray
             glm::vec3 rd = normalize(cCoord.x * rightDir + cCoord.y * upDir +
                                      (float)3 * lookDir);
             glm::vec3 ro = camPos;
 
-            // viewRayLines.push_back({0, viewRayPts.size()});
+            viewRayLines.push_back({N * N, viewRayPts.size()});
             viewRayPts.push_back(ro + tmax * rd);
 
             float t, omega, iter_frac;
@@ -108,7 +118,30 @@ void shootCameraRays(size_t N = 50) {
             iterationCounts.push_back(stats.total_iterations);
             overstep_success_rate.push_back((double)stats.successful_oversteps /
                                             (double)stats.total_iterations);
+            successful_extrapolations += stats.successful_extrapolations;
             didHit.push_back(hit);
+            steps_after_epsilon_loose.push_back(stats.n_steps_after_eps);
+            newton_steps.push_back(stats.n_newton_steps);
+
+            test_results[name] = stats;
+
+            // for (size_t iI = 0; iI < stats.times.size(); iI++) {
+            //     std::cout << std::setfill(' ') << std::setw(3) << iI
+            //               << "| t = " << std::setw(8) << stats.times[iI]
+            //               << "  ω = " << std::setw(8) << stats.omegas[iI]
+            //               << "  R = " << std::setw(8) << stats.Rs[iI]
+            //               << std::endl;
+            // }
+            // for (size_t iI = 0; iI < stats.newton_ts.size(); iI++) {
+            //     std::cout << std::setfill(' ') << std::setw(3) << iI
+            //               << "| t = " << std::setw(8) << stats.newton_ts[iI]
+            //               << "  f = " << std::setw(8) <<
+            //               stats.newton_vals[iI]
+            //               << " 4π = " << std::setw(8) << 4. * M_PI
+            //               << " dt = " << std::setw(8) << stats.newton_dts[iI]
+            //               << " df = " << std::setw(8) << stats.newton_dfs[iI]
+            //               << std::endl;
+            // }
         }
     }
     double duration = (std::clock() - start) / (double)CLOCKS_PER_SEC;
@@ -118,30 +151,93 @@ void shootCameraRays(size_t N = 50) {
     psCloud->addScalarQuantity("omega", omegas);
     psCloud->addVectorQuantity("normal", normals);
 
-    // polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
-    //     ->setEnabled(false);
     auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
     viewPts->addScalarQuantity("did hit", didHit);
     viewPts->addScalarQuantity("overstep success rate", overstep_success_rate);
     viewPts->addScalarQuantity("iteration counts", iterationCounts);
     viewPts->setPointRenderMode(polyscope::PointRenderMode::Quad);
 
-    float meanIterations =
-        std::accumulate(iterationCounts.begin(), iterationCounts.end(), 0.) /
-        iterationCounts.size();
+    auto mean = [](const std::vector<float>& v) -> float {
+        return std::accumulate(v.begin(), v.end(), 0.) / v.size();
+    };
+    float meanIterations = mean(iterationCounts);
     float maxIterations =
         *std::max_element(iterationCounts.begin(), iterationCounts.end());
-    float meanOverstepSuccessRate =
-        std::accumulate(overstep_success_rate.begin(),
-                        overstep_success_rate.end(), 0.) /
-        overstep_success_rate.size();
+    float meanOverstepSuccessRate        = mean(overstep_success_rate);
+    float mean_steps_after_epsilon_loose = mean(steps_after_epsilon_loose);
+    float mean_newton_steps              = mean(newton_steps);
 
     std::cout << "==== Stats    " << vendl;
-    std::cout << "        mean iterations: " << meanIterations << vendl;
-    std::cout << "         max iterations: " << maxIterations << vendl;
-    std::cout << "  overstep success rate: " << meanOverstepSuccessRate
+    std::cout << "           mean iterations: " << meanIterations << vendl;
+    std::cout << "            max iterations: " << maxIterations << vendl;
+    std::cout << "     overstep success rate: " << meanOverstepSuccessRate
               << vendl;
-    std::cout << "              mean time: " << meanTime << " s" << vendl;
+    std::cout << " successful extrapolations: " << successful_extrapolations
+              << vendl;
+    std::cout << "       steps after ε loose: "
+              << mean_steps_after_epsilon_loose << vendl;
+    std::cout << "              newton_steps: " << mean_newton_steps << vendl;
+    std::cout << "                 mean time: " << meanTime << " s" << vendl;
+
+    viewRayPts.push_back(camPos);
+    polyscope::registerCurveNetwork("view rays", viewRayPts, viewRayLines)
+        ->setEnabled(false);
+}
+
+void print_test_results() {
+    std::vector<std::string> tests; // get list of keys
+    size_t max_len = 0;
+    for (auto it = test_results.begin(); it != test_results.end(); ++it) {
+        tests.push_back(it->first);
+        max_len = std::max(max_len, it->second.times.size());
+    }
+
+    std::cout << "iter ";
+    for (std::string test : tests) {
+        std::cout << "| " << std::setfill(' ') << std::setw(54) << test;
+    }
+    std::cout << std::endl;
+
+    for (size_t iI = 0; iI < max_len; iI++) {
+        std::cout << std::setfill(' ') << std::setw(4) << iI << " ";
+        for (std::string t : tests) {
+            const acceleration_stats& stats = test_results[t];
+            float omega = -1, R = -1, r = -1;
+            if (iI < stats.omegas.size()) {
+                omega = stats.omegas[iI];
+                R     = stats.Rs[iI];
+                r     = stats.rs[iI];
+            }
+            std::cout << std::fixed;
+            std::cout.precision(5);
+            // //=== overstepping
+            // std::cout << "| t = " << std::setw(8) << stats.times[iI]
+            //           << "  ω = " << std::setw(8) << omega
+            //           << "  R = " << std::setw(8) << R
+            //           << "  r = " << std::setw(8) << r;
+            // //=== extrapolation
+            // std::cout << "| t  = " << std::setw(8) << stats.times[iI]
+            //           << "  v  = " << std::setw(8) << omega
+            //           << "  te = " << std::setw(8)
+            //           << stats.extrapolation_times[iI]
+            //           << "  ve = " << std::setw(8)
+            //           << stats.extrapolation_values[iI]
+            //           << "  vt = " << std::setw(8) << stats.true_values[iI]
+            //           << "  a  = " << std::setw(8) << stats.as[iI]
+            //           << "  b  = " << std::setw(8) << stats.bs[iI];
+            //=== newton
+            std::cout << "| t  = " << std::setw(8) << stats.times[iI]
+                      << "  v  = " << std::setw(8) << omega
+                      << "  te = " << std::setw(8)
+                      << stats.extrapolation_times[iI]
+                      << "  ve = " << std::setw(8)
+                      << stats.extrapolation_values[iI]
+                      << "  vt = " << std::setw(8) << stats.true_values[iI]
+                      << "  a  = " << std::setw(8) << stats.as[iI]
+                      << "  b  = " << std::setw(8) << stats.bs[iI];
+        }
+        std::cout << std::endl;
+    }
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -149,10 +245,22 @@ void shootCameraRays(size_t N = 50) {
 // https://github.com/ocornut/imgui/blob/master/imgui.h
 void myCallback() {
     if (ImGui::Button("Shoot Camera Rays")) {
-        shootCameraRays(resolution);
+        std::string name = (use_overstepping ? "overstep" : "normalstep");
+        shootCameraRays(resolution, name);
     }
     if (ImGui::Button("Restore Camera View")) {
         polyscope::view::setViewToCamera(camParams);
+    }
+    if (ImGui::Button("Print log")) {
+        print_test_results();
+    }
+    if (ImGui::Button("Test overstepping")) {
+        bool old_overstepping = use_overstepping;
+        use_overstepping      = true;
+        shootCameraRays(resolution, "overstep");
+        use_overstepping = false;
+        shootCameraRays(resolution, "normalstep");
+        print_test_results();
     }
 
     ImGui::Separator();
@@ -164,6 +272,8 @@ void myCallback() {
     ImGui::DragInt("resolution", &resolution, 1, 1, 500);
     ImGui::Checkbox("use_grad_termination", &use_grad_termination);
     ImGui::Checkbox("use_overstepping", &use_overstepping);
+    ImGui::Checkbox("use_extrapolation", &use_extrapolation);
+    ImGui::Checkbox("use_newton", &use_newton);
 }
 
 int main(int argc, char** argv) {

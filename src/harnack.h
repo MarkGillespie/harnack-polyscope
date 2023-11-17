@@ -266,12 +266,27 @@ typedef struct solid_angle_intersection_params {
     bool clip_y;
     bool capture_misses;
     bool use_overstepping;
+    bool use_extrapolation;
+    bool use_newton;
+    float epsilon_loose;
 } solid_angle_intersection_params;
 
 typedef struct acceleration_stats {
-    int total_iterations     = 0;
+    // general
+    int total_iterations = 0;
+    // oversteps
     int successful_oversteps = 0;
     int failed_oversteps     = 0;
+    std::vector<float> times, omegas, Rs, rs;
+    // extrapolation
+    int successful_extrapolations = 0;
+    std::vector<float> extrapolation_times, extrapolation_values, true_values,
+        as, bs;
+    // newton
+    int n_newton_steps            = 0;
+    int n_steps_after_eps         = 0;
+    int newton_found_intersection = 0;
+    std::vector<float> newton_dts, newton_dfs, newton_ts, newton_vals;
 } acceleration_stats;
 
 static bool printed_disk_normal = false;
@@ -387,12 +402,12 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
     // Fractional mod function that behaves the same as in GLSL
     auto glsl_mod = [](T x, T y) -> T { return x - y * std::floor(x / y); };
 
-    auto close_to_zero = [&](T ang, T lo_bound, T hi_bound,
+    auto close_to_zero = [&](T ang, T lo_bound, T hi_bound, T tol,
                              const T3& grad) -> bool {
         // Check if an angle is within epsilon of 0 or 4π
         T dis        = fmin(ang - lo_bound, hi_bound - ang);
         T tolScaling = params.use_grad_termination ? len(grad) : 1;
-        return dis < epsilon * tolScaling;
+        return dis < tol * tolScaling;
     };
 
     auto squared_distance_to_polygon_boundary = [&](uint iL, const T3& x,
@@ -720,7 +735,9 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
     T t_overstep = 0;
 
+    T t_prev = -1, val_prev = 0;
     static bool exceeded_max = false;
+    bool past_epsilon_loose  = false;
     while (t < ray_tmax) {
         T3 pos = fma(ray_P, t + t_overstep, ray_D);
 
@@ -733,7 +750,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                        "iterations.\n");
             }
 
-            *isect_t = t;
+            *isect_t = t + t_overstep;
             *isect_v = ((T)iter) / ((T)params.max_iterations);
             report_stats();
             if (params.capture_misses) {
@@ -785,20 +802,108 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         // Compute a conservative step size based on the Harnack bound.
         T r = get_max_step(val, R, lo_bound, hi_bound, shift) / ld;
 
+        if (stats) {
+            stats->times.push_back(t + t_overstep);
+            stats->omegas.push_back(val);
+            stats->Rs.push_back(R);
+            stats->rs.push_back(r);
+        }
+
         if (r >= t_overstep) { // commit to step
             // If we're close enough to the level set, or we've exceeded the
             // maximum number of iterations, assume there's a hit.
-            if (close_to_zero(val, lo_bound, hi_bound, grad) || R < epsilon ||
-                iter > params.max_iterations) {
+            if (close_to_zero(val, lo_bound, hi_bound, epsilon, grad) ||
+                R < epsilon || iter > params.max_iterations) {
                 // if (R < epsilon)   grad = pos - closestPoint; // TODO: this?
-                *isect_t = t;
+                *isect_t = t + t_overstep;
                 *isect_u = omega / static_cast<T>(4. * M_PI);
                 *isect_v = ((T)iter) / ((T)params.max_iterations);
                 report_stats();
                 return true;
             }
 
-            t += r;
+            if (close_to_zero(val, lo_bound, hi_bound, params.epsilon_loose,
+                              grad)) {
+                past_epsilon_loose = true;
+                if (params.use_newton) {
+
+                    auto f = [&](T t) -> T { // also updates grad
+                        T3 pos  = fma(ray_P, t + t_overstep, ray_D);
+                        T omega = total_solid_angle(pos, grad);
+                        return glsl_mod(omega - levelset,
+                                        static_cast<T>(4. * M_PI));
+
+                    };
+
+                    // run a few rounds of Newton iteration
+                    for (int i = 0; i < 8; i++) {
+
+                        T df = dot(ray_D, grad);
+                        T dt = -(val < 2. * M_PI ? val : val - 4. * M_PI) / df;
+
+                        t += dt;
+                        val = f(t);
+
+                        if (stats) {
+                            stats->newton_dfs.push_back(df);
+                            stats->newton_dts.push_back(dt);
+                            stats->newton_ts.push_back(t);
+                            stats->newton_vals.push_back(val);
+                            stats->n_newton_steps++;
+                        }
+                        if (close_to_zero(val, lo_bound, hi_bound, epsilon,
+                                          grad)) {
+                            *isect_t = t + t_overstep;
+                            *isect_u = omega / static_cast<T>(4. * M_PI);
+                            *isect_v = ((T)iter) / ((T)params.max_iterations);
+                            report_stats();
+                            return true;
+                        }
+                    }
+
+                    // TODO: really, you should keep going here if not close to
+                    // zero
+                }
+            }
+
+            if (params.use_extrapolation) {
+                // model val(t) = a t + b
+                float a      = (val - val_prev) / (t + t_overstep - t_prev);
+                float b      = val - a * t;
+                float t_low  = (lo_bound - b) / a;
+                float t_high = (hi_bound - b) / a;
+                float t_test = -1.;
+                if (t_low > 0. && t_high > 0.) {
+                    t_test = fmin(t_low, t_high);
+                } else if (t_low > 0.) {
+                    t_test = t_low;
+                } else if (t_high > 0.) {
+                    t_test = t_high;
+                }
+
+                T3 e_pos = fma(ray_P, t_test, ray_D);
+                T3 e_grad;
+                T e_omega = total_solid_angle(e_pos, e_grad);
+                T e_val = glsl_mod(omega - levelset, static_cast<T>(4. * M_PI));
+
+                stats->as.push_back(a);
+                stats->bs.push_back(b);
+                stats->extrapolation_times.push_back(t_test);
+                stats->extrapolation_values.push_back(a * t_test + b);
+                stats->true_values.push_back(e_val);
+                if (0. <= t_test && t_test <= 4. * (t + t_overstep - t_prev)) {
+                    if (close_to_zero(e_val, lo_bound, hi_bound, epsilon,
+                                      e_grad)) {
+                        stats->successful_extrapolations++;
+                        return true;
+                    }
+                }
+
+                t_prev   = t + t_overstep;
+                val_prev = val;
+            }
+
+            t += t_overstep + r;
             if (params.use_overstepping) t_overstep = r * .75;
             if (params.use_overstepping && stats) stats->successful_oversteps++;
         } else { // step back and try again
@@ -806,6 +911,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
             if (stats) stats->failed_oversteps++;
         }
         iter++;
+        if (past_epsilon_loose && stats) stats->n_steps_after_eps++;
     }
 
     *isect_t = t;
@@ -856,7 +962,8 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
         uint iStart = loops[iL].x - globalStart;
         uint N      = loops[iL].y;
 
-        //== Test if loop is "circular", i.e. 5-sided, equidistant from center
+        //== Test if loop is "circular", i.e. 5-sided, equidistant from
+        // center
         // point, and planar
         //     if so, store the center, normal, and radius
         T3 center, normal;
@@ -907,7 +1014,8 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
             diskNormals.push_back(normal);
             diskRadii.push_back(radius);
         } else {
-            // if loop was not determined to be circular, record it as a polygon
+            // if loop was not determined to be circular, record it as a
+            // polygon
             polygonLoops.push_back(iL);
         }
     }
@@ -976,8 +1084,8 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
         // double elliptic_errtol = 0.75;
         double elliptic_errtol = 0.01;
 
-        // Formulas from Solid Angle Calculation for a Circular Disk by Paxton
-        // 1959
+        // Formulas from Solid Angle Calculation for a Circular Disk by
+        // Paxton 1959
         T3 displacement =
             diff(x, diskCenters[iD]); // might need to switch to diff_f
         const T3& zHat = diskNormals[iD];
@@ -998,8 +1106,8 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
         T F = elliptic_fm(kSq, elliptic_errtol);
 
         // TODO: adjust tolerance
-        // ( When r0 and rm are too close, alphaSq goes to 1, which leads to a
-        // singularity in elliptic_pim )
+        // ( When r0 and rm are too close, alphaSq goes to 1, which leads to
+        // a singularity in elliptic_pim )
         T omega;
         if (std::abs(r0 - rm) < 1e-3) {
             omega = sign * (M_PI - 2 * aL / Rmax * F);
@@ -1076,7 +1184,8 @@ ccl_device float3 ray_spherical_harmonic_normal_T(const float3 pf, uint m,
 
     T3 p = from_float3(pf);
 
-    // Return the value of this harmonic polynomial at an evaluation point p,
+    // Return the value of this harmonic polynomial at an evaluation point
+    // p,
     auto evaluatePolynomial = [&](const T3& p) -> T {
         return evaluateSphericalHarmonic(l, m, p);
     };
