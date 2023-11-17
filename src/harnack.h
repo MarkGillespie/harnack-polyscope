@@ -410,58 +410,62 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         return dis < tol * tolScaling;
     };
 
-    auto squared_distance_to_polygon_boundary = [&](uint iL, const T3& x,
-                                                    T3* closest_point) -> T {
-        uint iStart = params.loops[iL].x - globalStart;
-        uint N      = params.loops[iL].y;
+    // update min_d2, closest_point, and tangent if any closer point is present
+    // on loop iL. closest_point and tangent may be null, but min_d2 must not be
+    auto squared_distance_to_polygon_boundary =
+        [&](uint iL, const T3& x, T* min_d2, T3* closest_point, T3* tangent) {
+            uint iStart = params.loops[iL].x - globalStart;
+            uint N      = params.loops[iL].y;
 
-        // TODO maybe replace with numeric_limits<T>::infinity()?
-        const T infinity = 100000.;
-        T min_d2         = infinity;
+            // compute closest distance to each polygon line segment
+            for (uint i = 0; i < N; i++) {
+                T3 p1 = from_float3(params.pts[iStart + i]);
+                T3 p2 = from_float3(params.pts[iStart + (i + 1) % N]);
+                T3 m  = diff(p2, p1);
+                T3 v  = diff(x, p1);
+                // dot = |a|*|b|cos(theta) * n, isolating |a|sin(theta)
+                T t  = fmin(fmax(dot(m, v) / dot(m, m), 0.), 1.);
+                T d2 = len_squared(fma(v, -t, m));
+                // if closestPoint is not null, update it to track closest point
+                if (closest_point && d2 < *min_d2)
+                    *closest_point = fma(p1, t, m);
+                if (tangent && d2 < *min_d2) *tangent = diff(p2, p1);
+                *min_d2 = fmin(*min_d2, d2);
+            }
+            if (tangent) normalize(*tangent);
+        };
 
-        // compute closest distance to each polygon line segment
-        for (uint i = 0; i < N; i++) {
-            T3 p1 = from_float3(params.pts[iStart + i]);
-            T3 p2 = from_float3(params.pts[iStart + (i + 1) % N]);
-            T3 m  = diff(p2, p1);
-            T3 v  = diff(x, p1);
-            // dot = |a|*|b|cos(theta) * n, isolating |a|sin(theta)
-            T t  = fmin(fmax(dot(m, v) / dot(m, m), 0.), 1.);
-            T d2 = len_squared(fma(v, -t, m));
-            // if closestPoint is not null, update it to track closest point
-            if (closest_point && d2 < min_d2) *closest_point = fma(p1, t, m);
-            min_d2 = fmin(min_d2, d2);
-        }
+    // update min_d2, closest_point, and tangent if any closer point is present
+    // on disk iD. closest_point and tangent may be null, but min_d2 must not be
+    auto squared_distance_to_disk_boundary =
+        [&](uint iD, const T3& x, T* min_d2, T3* closest_point, T3* tangent) {
+            T3 displacement = diff(x, diskCenters[iD]);
+            T L             = dot(displacement, diskNormals[iD]);
+            T r0            = len(fma(displacement, -L, diskNormals[iD]));
+            T rm            = diskRadii[iD];
+            T d2            = std::pow(rm - r0, 2) + std::pow(L, 2);
+            *min_d2         = fmin(*min_d2, d2);
+            if (d2 < *min_d2 && closest_point) {
+                T3 rHat        = fma(displacement, -L, diskNormals[iD]);
+                *closest_point = fma(diskCenters[iD], rm / r0, rHat);
+            }
+            if (d2 < *min_d2 && tangent) {
+                *tangent = cross(diskNormals[iD], displacement);
+                normalize(*tangent);
+            }
+        };
 
-        return min_d2;
-    };
-
-    auto squared_distance_to_disk_boundary = [&](uint iD, const T3& x,
-                                                 T3* closest_point) -> T {
-        T3 displacement = diff(x, diskCenters[iD]);
-        T L             = dot(displacement, diskNormals[iD]);
-        T r0            = len(fma(displacement, -L, diskNormals[iD]));
-        T rm            = diskRadii[iD];
-        T d2            = std::pow(rm - r0, 2) + std::pow(L, 2);
-        // if closest_point is not null, update it to track closest point
-        if (false) {
-            T3 rHat        = fma(displacement, -L, diskNormals[iD]);
-            *closest_point = fma(diskCenters[iD], rm / r0, rHat);
-        }
-        return d2;
-    };
-
-    auto distance_to_boundary = [&](const T3& x, T3* closest_point) -> T {
+    auto distance_to_boundary = [&](const T3& x, T3* closest_point,
+                                    T3* tangent) -> T {
         const T infinity = 100000.;
         T min_d2         = infinity;
         // TODO: TKTKTKT closest point logic is broken
         for (uint iL : polygonLoops)
-            min_d2 = fmin(min_d2, squared_distance_to_polygon_boundary(
-                                      iL, x, closest_point));
+            squared_distance_to_polygon_boundary(iL, x, &min_d2, closest_point,
+                                                 tangent);
         for (uint iD = 0; iD < diskCenters.size(); iD++)
-            min_d2 =
-                fmin(min_d2,
-                     squared_distance_to_disk_boundary(iD, x, closest_point));
+            squared_distance_to_disk_boundary(iD, x, &min_d2, closest_point,
+                                              tangent);
         return std::sqrt(min_d2);
     };
 
@@ -797,7 +801,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         // ball is to restrict to the sphere touching the closest point on the
         // polygon boundary.
         T3 closestPoint;
-        T R = distance_to_boundary(pos, &closestPoint);
+        T R = distance_to_boundary(pos, &closestPoint, nullptr);
 
         // Compute a conservative step size based on the Harnack bound.
         T r = get_max_step(val, R, lo_bound, hi_bound, shift) / ld;
@@ -827,7 +831,6 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                 // try newton's method when you first enter the epsilon_loose
                 // shell
                 if (params.use_newton && !inside_loose_shell) {
-
                     auto f = [&](T t) -> T { // also updates grad
                         T3 pos  = fma(ray_P, t + t_overstep, ray_D);
                         T omega = total_solid_angle(pos, grad);
@@ -836,34 +839,95 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
                     };
 
-                    // run a few rounds of Newton iteration
-                    for (int i = 0; i < 8; i++) {
+                    // if you're too close to the curve, do a weird
+                    // approximation thing
+                    if (R < 0.25) {
+                        T t_radial = t + t_overstep;
+                        T3 tangent;
+                        T R = distance_to_boundary(pos, nullptr, &tangent);
+                        T3 rd_planar =
+                            fma(ray_D, -dot(ray_D, tangent), tangent);
 
-                        T df = dot(ray_D, grad);
-                        T dt = -(val < 2. * M_PI ? val : val - 4. * M_PI) / df;
+                        for (int i = 0; i < 5; i++) {
+                            T val_err =
+                                (val < 2. * M_PI ? -val : 4. * M_PI - val);
+                            T alpha =
+                                -atan2(dot(tangent, cross(rd_planar, grad)),
+                                       dot(rd_planar, grad));
+                            T dt = R * sin(val_err) / cos(val_err - alpha);
+                            // todo: clever trig to use tan(val) somehow?
+                            T old_val = val;
+                            val       = f(t_radial + dt);
+                            T new_val_err =
+                                (val < 2. * M_PI ? -val : 4. * M_PI - val);
+                            while (val_err * new_val_err < 0 && dt > 1e-8) {
+                                dt /= 2;
+                                val = f(t_radial + dt);
+                                new_val_err =
+                                    (val < 2. * M_PI ? -val : 4. * M_PI - val);
+                                if (stats) {
+                                    stats->n_newton_steps++;
+                                }
+                            }
+                            t_radial += dt;
+                            bool close = close_to_zero(val, lo_bound, hi_bound,
+                                                       epsilon, grad);
 
-                        t += dt;
-                        val = f(t);
-
-                        if (stats) {
-                            stats->newton_dfs.push_back(df);
-                            stats->newton_dts.push_back(dt);
-                            stats->newton_ts.push_back(t);
-                            stats->newton_vals.push_back(val);
-                            stats->n_newton_steps++;
+                            // if (i == 0) {
+                            //     std::cout << "radial approx: ";
+                            // } else {
+                            //     std::cout << "             : ";
+                            // }
+                            // std::cout << std::fixed;
+                            // std::cout.precision(5);
+                            // //=== newton
+                            // std::cout
+                            //     << "| t  = " << std::setw(8) << t +
+                            //     t_overstep
+                            //     << "  f  = " << std::setw(8) << old_val
+                            //     << "  4π = " << std::setw(8) << 4. * M_PI
+                            //     << "  dt = " << std::setw(8) << dt
+                            //     << "  f' = " << std::setw(8) << val
+                            //     << " close: " << (close ? "true" : "false");
+                            // std::cout << std::endl;
+                            if (close) {
+                                *isect_t = t_radial;
+                                *isect_u = omega / static_cast<T>(4. * M_PI);
+                                *isect_v =
+                                    ((T)iter) / ((T)params.max_iterations);
+                                report_stats();
+                                return true;
+                            }
                         }
-                        if (close_to_zero(val, lo_bound, hi_bound, epsilon,
-                                          grad)) {
-                            *isect_t = t + t_overstep;
-                            *isect_u = omega / static_cast<T>(4. * M_PI);
-                            *isect_v = ((T)iter) / ((T)params.max_iterations);
-                            report_stats();
-                            return true;
+
+                    } else { // otherwise, run a few rounds of Newton's method
+                        T t_newton = t + t_overstep;
+                        for (int i = 0; i < 8; i++) {
+                            T df = dot(ray_D, grad);
+                            T dt =
+                                -(val < 2. * M_PI ? val : val - 4. * M_PI) / df;
+
+                            t_newton += dt;
+                            val = f(t_newton);
+
+                            if (stats) {
+                                stats->newton_dfs.push_back(df);
+                                stats->newton_dts.push_back(dt);
+                                stats->newton_ts.push_back(t_newton);
+                                stats->newton_vals.push_back(val);
+                                stats->n_newton_steps++;
+                            }
+                            if (close_to_zero(val, lo_bound, hi_bound, epsilon,
+                                              grad)) {
+                                *isect_t = t_newton;
+                                *isect_u = omega / static_cast<T>(4. * M_PI);
+                                *isect_v =
+                                    ((T)iter) / ((T)params.max_iterations);
+                                report_stats();
+                                return true;
+                            }
                         }
                     }
-
-                    // TODO: really, you should keep going here if not close to
-                    // zero
                 }
                 inside_loose_shell = true;
             } else {

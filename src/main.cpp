@@ -16,11 +16,11 @@ std::vector<uint3> loops{uint3{0, 4, 0}};
 
 float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
-int resolution            = 1;
+int resolution            = 10;
 bool use_grad_termination = true;
 bool use_overstepping     = false;
 bool use_extrapolation    = false;
-bool use_newton           = false;
+bool use_newton           = true;
 
 polyscope::PointCloud* psCloud;
 
@@ -123,7 +123,8 @@ void shootCameraRays(size_t N = 50, std::string name = "default") {
             steps_after_epsilon_loose.push_back(stats.n_steps_after_eps);
             newton_steps.push_back(stats.n_newton_steps);
 
-            test_results[name] = stats;
+            if (stats.newton_ts.size() >= test_results[name].newton_ts.size())
+                test_results[name] = stats;
 
             // for (size_t iI = 0; iI < stats.times.size(); iI++) {
             //     std::cout << std::setfill(' ') << std::setw(3) << iI
@@ -186,10 +187,11 @@ void shootCameraRays(size_t N = 50, std::string name = "default") {
 
 void print_test_results() {
     std::vector<std::string> tests; // get list of keys
-    size_t max_len = 0;
+    size_t max_step_len = 0, max_newton_len = 0;
     for (auto it = test_results.begin(); it != test_results.end(); ++it) {
         tests.push_back(it->first);
-        max_len = std::max(max_len, it->second.times.size());
+        max_step_len   = std::max(max_step_len, it->second.times.size());
+        max_newton_len = std::max(max_newton_len, it->second.newton_ts.size());
     }
 
     std::cout << "iter ";
@@ -198,43 +200,53 @@ void print_test_results() {
     }
     std::cout << std::endl;
 
-    for (size_t iI = 0; iI < max_len; iI++) {
+    if (false) {
+        for (size_t iI = 0; iI < max_step_len; iI++) {
+            std::cout << std::setfill(' ') << std::setw(4) << iI << " ";
+            for (std::string t : tests) {
+                const acceleration_stats& stats = test_results[t];
+                float omega = -1, R = -1, r = -1;
+                if (iI < stats.omegas.size()) {
+                    omega = stats.omegas[iI];
+                    R     = stats.Rs[iI];
+                    r     = stats.rs[iI];
+                }
+                std::cout << std::fixed;
+                std::cout.precision(5);
+                // //=== overstepping
+                // std::cout << "| t = " << std::setw(8) << stats.times[iI]
+                //           << "  ω = " << std::setw(8) << omega
+                //           << "  R = " << std::setw(8) << R
+                //           << "  r = " << std::setw(8) << r;
+                // //=== extrapolation
+                // std::cout << "| t  = " << std::setw(8) << stats.times[iI]
+                //           << "  v  = " << std::setw(8) << omega
+                //           << "  te = " << std::setw(8)
+                //           << stats.extrapolation_times[iI]
+                //           << "  ve = " << std::setw(8)
+                //           << stats.extrapolation_values[iI]
+                //           << "  VT = " << std::setw(8) <<
+                //           stats.true_values[iI]
+                //           << "  a  = " << std::setw(8) << stats.as[iI]
+                //           << "  b  = " << std::setw(8) << stats.bs[iI];
+            }
+            std::cout << std::endl;
+        }
+    }
+    for (size_t i = 0; i < 60; i++) std::cout << "-";
+    std::cout << vendl;
+    for (size_t iI = 0; iI < max_newton_len; iI++) {
         std::cout << std::setfill(' ') << std::setw(4) << iI << " ";
         for (std::string t : tests) {
             const acceleration_stats& stats = test_results[t];
-            float omega = -1, R = -1, r = -1;
-            if (iI < stats.omegas.size()) {
-                omega = stats.omegas[iI];
-                R     = stats.Rs[iI];
-                r     = stats.rs[iI];
-            }
             std::cout << std::fixed;
             std::cout.precision(5);
-            // //=== overstepping
-            // std::cout << "| t = " << std::setw(8) << stats.times[iI]
-            //           << "  ω = " << std::setw(8) << omega
-            //           << "  R = " << std::setw(8) << R
-            //           << "  r = " << std::setw(8) << r;
-            // //=== extrapolation
-            // std::cout << "| t  = " << std::setw(8) << stats.times[iI]
-            //           << "  v  = " << std::setw(8) << omega
-            //           << "  te = " << std::setw(8)
-            //           << stats.extrapolation_times[iI]
-            //           << "  ve = " << std::setw(8)
-            //           << stats.extrapolation_values[iI]
-            //           << "  VT = " << std::setw(8) << stats.true_values[iI]
-            //           << "  a  = " << std::setw(8) << stats.as[iI]
-            //           << "  b  = " << std::setw(8) << stats.bs[iI];
             //=== newton
-            std::cout << "| t  = " << std::setw(8) << stats.times[iI]
-                      << "  v  = " << std::setw(8) << omega
-                      << "  te = " << std::setw(8)
-                      << stats.extrapolation_times[iI]
-                      << "  ve = " << std::setw(8)
-                      << stats.extrapolation_values[iI]
-                      << "  vt = " << std::setw(8) << stats.true_values[iI]
-                      << "  a  = " << std::setw(8) << stats.as[iI]
-                      << "  b  = " << std::setw(8) << stats.bs[iI];
+            std::cout << "| t  = " << std::setw(8) << stats.newton_ts[iI]
+                      << "  f  = " << std::setw(8) << stats.newton_vals[iI]
+                      << "  4π = " << std::setw(8) << 4. * M_PI
+                      << "  dt = " << std::setw(8) << stats.newton_dts[iI]
+                      << "  df = " << std::setw(8) << stats.newton_dfs[iI];
         }
         std::cout << std::endl;
     }
