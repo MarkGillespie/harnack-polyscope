@@ -16,7 +16,8 @@ std::vector<uint3> loops{uint3{0, 4, 0}};
 
 float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
-int resolution            = 10;
+int resolution_x          = 10;
+int resolution_y          = 10;
 bool use_grad_termination = true;
 bool use_overstepping     = false;
 bool use_extrapolation    = false;
@@ -29,7 +30,7 @@ float3 to_float3(glm::vec3 v) { return make_float3(v.x, v.y, v.z); }
 glm::vec3 to_vec3(float3 v) { return glm::vec3{v.x, v.y, v.z}; }
 
 bool intersect(glm::vec3 ro, glm::vec3 rd, float* t, float* iter_frac,
-               float* omega, acceleration_stats* stats) {
+               float* omega, acceleration_stats* stats = nullptr) {
     solid_angle_intersection_params sa_params;
     sa_params.ray_P                = to_float3(ro);
     sa_params.ray_D                = to_float3(rd);
@@ -70,12 +71,13 @@ std::ostream& operator<<(std::ostream& out, const glm::vec3& vec) {
 //====== Experiment code
 std::map<std::string, acceleration_stats> test_results;
 polyscope::CameraParameters camParams;
-void shootCameraRays(size_t N = 50, std::string name = "default") {
-    camParams = polyscope::view::getCameraParametersForCurrentView();
-    glm::vec3 lookDir, upDir, rightDir;
-    polyscope::view::getCameraFrame(lookDir, upDir, rightDir);
-    glm::vec3 camPos     = polyscope::view::getCameraWorldPosition();
-    double fovY          = 50.0;
+void shootCameraRays(std::string name = "default") {
+    camParams            = polyscope::view::getCameraParametersForCurrentView();
+    glm::vec3 camPos     = camParams.getPosition();
+    glm::vec3 lookDir    = camParams.getLookDir();
+    glm::vec3 upDir      = camParams.getUpDir();
+    glm::vec3 rightDir   = camParams.getRightDir();
+    double fovY          = camParams.getFoVVerticalDegrees();
     glm::vec2 tanHalfFov = glm::vec2(tan(radians(fovY) * 0.5));
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
@@ -85,22 +87,28 @@ void shootCameraRays(size_t N = 50, std::string name = "default") {
     std::vector<char> didHit;
     size_t successful_extrapolations = 0;
     float s                          = 0.05;
-    intersections.reserve(N * N);
-    double start = std::clock();
-    for (size_t iX = 0; iX < N; iX++) {
-        for (size_t iY = 0; iY < N; iY++) {
+    intersections.reserve(resolution_x * resolution_y);
+    double start       = std::clock();
+    float aspect_ratio = (float)resolution_x / (float)resolution_y;
+    for (int iY = 0; iY < resolution_y; iY++) {
+        for (int iX = 0; iX < resolution_x; iX++) {
 
-            glm::vec2 cCoord =
-                (N <= 1)
-                    ? glm::vec2{0, 0}
-                    : glm::vec2{iX, iY} / (float)(N - 1) * (float)2 - (float)1;
+            glm::vec2 cCoord = (resolution_x * resolution_y <= 1)
+                                   ? glm::vec2{0, 0}
+                                   : glm::vec2{iX / (float)(resolution_x - 1),
+                                               iY / (float)(resolution_y - 1)} *
+                                             (float)2 -
+                                         (float)1;
+            cCoord.x *= aspect_ratio;
 
             // create view ray
             glm::vec3 rd = normalize(cCoord.x * rightDir + cCoord.y * upDir +
                                      (float)3 * lookDir);
             glm::vec3 ro = camPos;
 
-            viewRayLines.push_back({N * N, viewRayPts.size()});
+            viewRayLines.push_back(
+                {static_cast<size_t>(resolution_x * resolution_y),
+                 viewRayPts.size()});
             viewRayPts.push_back(ro + tmax * rd);
 
             float t, omega, iter_frac;
@@ -252,6 +260,29 @@ void print_test_results() {
     }
 }
 
+void print_camera_view() {
+    glm::vec3 camPos   = camParams.getPosition();
+    glm::vec3 lookDir  = camParams.getLookDir();
+    glm::vec3 upDir    = camParams.getUpDir();
+    glm::vec3 rightDir = camParams.getRightDir();
+    double fovY        = camParams.getFoVVerticalDegrees();
+
+    glm::mat3 default_cam_mat(rightDir, upDir, lookDir);
+    glm::vec3 camSpaceCamPos = inverse(default_cam_mat) * camPos;
+
+    std::cout << "//== Camera Parameters" << std::endl;
+    std::cout << "const vec3 cam_pos   = vec3" << camPos << ";" << std::endl;
+    std::cout << "const vec3 look_dir  = vec3" << lookDir << ";" << std::endl;
+    std::cout << "const vec3 up_dir    = vec3" << upDir << ";" << std::endl;
+    std::cout << "const vec3 right_dir = vec3" << rightDir << ";" << std::endl;
+    std::cout
+        << "const mat3 default_cam_mat = mat3(right_dir, up_dir, look_dir);"
+        << std::endl;
+    std::cout << "const vec3 cam_space_cam_pos   = vec3" << camSpaceCamPos
+              << ";" << std::endl;
+    std::cout << "const float fovY = " << fovY << ";" << std::endl;
+}
+
 // A user-defined callback, for creating control panels (etc)
 // Use ImGUI commands to build whatever you want here, see
 // https://github.com/ocornut/imgui/blob/master/imgui.h
@@ -264,10 +295,13 @@ void myCallback() {
             std::string(use_newton ? "newton-accelerated " : "");
         if (name.length() == 0) name = "default ";
         name = name.substr(0, name.size() - 1); // trim trailing space
-        shootCameraRays(resolution, name);
+        shootCameraRays(name);
     }
     if (ImGui::Button("Restore Camera View")) {
         polyscope::view::setViewToCamera(camParams);
+    }
+    if (ImGui::Button("Print Camera View")) {
+        print_camera_view();
     }
     if (ImGui::Button("Print log")) {
         print_test_results();
@@ -275,9 +309,9 @@ void myCallback() {
     if (ImGui::Button("Test overstepping")) {
         bool old_overstepping = use_overstepping;
         use_overstepping      = true;
-        shootCameraRays(resolution, "overstep");
+        shootCameraRays("overstep");
         use_overstepping = false;
-        shootCameraRays(resolution, "normalstep");
+        shootCameraRays("normalstep");
         print_test_results();
     }
 
@@ -287,7 +321,8 @@ void myCallback() {
     ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
     ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
     ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 50000);
-    ImGui::DragInt("resolution", &resolution, 1, 1, 500);
+    ImGui::DragInt("resolution x", &resolution_x, 1, 1, 2000);
+    ImGui::DragInt("resolution y", &resolution_y, 1, 1, 2000);
     ImGui::Checkbox("use_grad_termination", &use_grad_termination);
     ImGui::Checkbox("use_overstepping", &use_overstepping);
     ImGui::Checkbox("use_extrapolation", &use_extrapolation);
