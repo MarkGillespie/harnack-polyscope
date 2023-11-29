@@ -244,11 +244,13 @@ typedef struct solid_angle_intersection_params {
     bool use_extrapolation;
     bool use_newton;
     float epsilon_loose;
+    bool fixed_step_count;
 } solid_angle_intersection_params;
 
 typedef struct acceleration_stats {
     // general
     int total_iterations = 0;
+    std::vector<float> ts, vals;
     // oversteps
     int successful_oversteps = 0;
     int failed_oversteps     = 0;
@@ -750,6 +752,11 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         // value, within the range [0,4π).  Only then do we apply the shift.
         T val = glsl_mod(omega - levelset, static_cast<T>(4. * M_PI));
 
+        if (stats) {
+            stats->ts.push_back(t + t_overstep);
+            stats->vals.push_back(val);
+        }
+
         if (frequency > 0) {
             lo_bound = 0;
             hi_bound = 4. * M_PI;
@@ -790,7 +797,8 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
         if (r >= t_overstep) { // commit to step
             // If we're close enough to the level set, or we've exceeded the
             // maximum number of iterations, assume there's a hit.
-            if (close_to_zero(val, lo_bound, hi_bound, epsilon, grad) ||
+            if (!params.fixed_step_count &&
+                    close_to_zero(val, lo_bound, hi_bound, epsilon, grad) ||
                 R < epsilon || iter > params.max_iterations) {
                 // if (R < epsilon)   grad = pos - closestPoint; // TODO: this?
                 *isect_t = t + t_overstep;
@@ -800,7 +808,8 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                 return true;
             }
 
-            if (close_to_zero(val, lo_bound, hi_bound, params.epsilon_loose,
+            if (!params.fixed_step_count &&
+                close_to_zero(val, lo_bound, hi_bound, params.epsilon_loose,
                               grad)) {
                 // try newton's method when you first enter the epsilon_loose
                 // shell
@@ -908,7 +917,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
                 inside_loose_shell = false;
             }
 
-            if (params.use_extrapolation) {
+            if (!params.fixed_step_count && params.use_extrapolation) {
                 // model val(t) = a t + b
                 float a      = (val - val_prev) / (t + t_overstep - t_prev);
                 float b      = val - a * t;

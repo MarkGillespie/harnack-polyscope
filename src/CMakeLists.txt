@@ -10,8 +10,14 @@ add_executable(
   main.cpp
   utils.cpp
   math_elliptic_integral.cpp
+  generalized_barycentric_coordinates.cpp
+  geometry_utils.cpp
 )
 target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 # borrow args.hxx directly from polyscope
 target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../deps/polyscope/deps/args/")
-target_link_libraries(run polyscope)
+target_link_libraries(run polyscope geometry-central)
+
+target_include_directories(run PUBLIC ${FCPW_EIGEN_INCLUDES})
+target_include_directories(run PUBLIC ${FCPW_ENOKI_INCLUDES})
+target_link_libraries(run fcpw)

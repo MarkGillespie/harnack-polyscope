@@ -35,6 +35,8 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" OR "${CMAKE_CXX_COMPILER_ID}" STR
     message("Setting gcc-specific options")
     SET(BASE_CXX_FLAGS "${BASE_CXX_FLAGS} -fmax-errors=5")
     SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} -Wno-maybe-uninitialized -Wno-format-zero-length -Wno-unused-but-set-parameter -Wno-unused-but-set-variable")
+    # fcpw triggers a lot of these
+    SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} -Wno-sign-compare")
   endif()
 
   SET(CMAKE_CXX_FLAGS "${BASE_CXX_FLAGS} ${DISABLED_WARNINGS}")
@@ -71,5 +73,7 @@ endif()
 
 
 # == Deps
+add_subdirectory(deps/fcpw)
 add_subdirectory(deps/polyscope)
+add_subdirectory(deps/geometry-central)
 add_subdirectory(src)
