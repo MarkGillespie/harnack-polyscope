@@ -16,15 +16,128 @@
 #include "harnack.h"
 #include "utils.h"
 
+using namespace geometrycentral;
+using namespace geometrycentral::surface;
+
 //====== Scene parameters
 
-float s = 0.5;
+float s = 0.5; // used in convergence tests
 std::vector<float3> pts{float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1},
                         float3{1, -s, -1}};
-// float s = 0.1;
-// std::vector<float3> pts{float3{1, 0, 1}, float3{0, s, -1}, float3{-1, 0, 1},
-//                         float3{0, -s, -.5}};
 std::vector<uint3> loops{uint3{0, 4, 0}};
+
+typedef struct named_polygon {
+    std::string name;
+    std::vector<float3> pts;
+    std::vector<uint3> loops;
+    size_t cam_view;
+} named_polygon;
+const float r2                            = 1. / sqrt(2.);
+std::vector<named_polygon> named_polygons = {
+    {"default",
+     {float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1}, float3{1, -s, -1}},
+     {uint3{0, 4, 0}},
+     0},
+    {"nonconvex_planar_quad",
+     {float3{1, 0, 1}, float3{0, 0, -1}, float3{-1, 0, 1}, float3{0, -0, -.5}},
+     {uint3{0, 4, 0}},
+     1},
+    {"nonconvex_nonplanar_quad",
+     {float3{1, 0.1, 1}, float3{0, 0.2, -1}, float3{-1, 0.1, 1},
+      float3{0, 0, -.5}},
+     {uint3{0, 4, 0}},
+     2},
+    {"nonconvex_planar_octagon",
+     {float3{1, 0, -1}, float3{1, 0, 1}, float3{1 / 3., 0, 1},
+      float3{1 / 3., 0, -1 / 3.}, float3{-1 / 3., 0, -1 / 3.},
+      float3{-1 / 3., 0, 1}, float3{-1, 0, 1}, float3{-1, 0, -1}},
+     {uint3{0, 8, 0}},
+     3},
+    {"nonconvex_nonplanar_octagon",
+     {float3{1, 0, -1}, float3{1, 0.1, 1}, float3{1 / 3., 0.2, 1},
+      float3{1 / 3., 0., -1 / 3.}, float3{-1 / 3., 0., -1 / 3.},
+      float3{-1 / 3., 0.2, 1}, float3{-1, 0.1, 1}, float3{-1, 0, -1}},
+     {uint3{0, 8, 0}},
+     3},
+    {"nice_nonplanar_octagon",
+     {float3{1, 0, 0}, float3{r2, 1, r2}, float3{0, 0, 1}, float3{-r2, 1, r2},
+      float3{-1, 0, 0}, float3{-r2, 1., -r2}, float3{0, 0, -1},
+      float3{r2, 1, -r2}},
+     {uint3{0, 8, 0}},
+     4},
+};
+
+void construct_approaching_circles() {
+    std::vector<double> Ts{.2, .3, .455, .5, .7};
+    size_t circle_resolution = 4;
+    for (size_t iT = 0; iT < Ts.size(); iT++) {
+        float d = Ts[iT];
+        named_polygons.push_back(named_polygon{
+            "approaching_circles_" + std::to_string(iT),
+            {},
+            {uint3{0, (uint)circle_resolution, 0},
+             uint3{(uint)circle_resolution, (uint)circle_resolution, 0}},
+            5});
+        for (size_t iR = 0; iR < circle_resolution; iR++) {
+            float s = 2. * M_PI * (float)iR / ((float)circle_resolution);
+            named_polygons.back().pts.push_back(float3{cos(s), sin(s) + 1, d});
+        }
+        for (size_t iR = 0; iR < circle_resolution; iR++) {
+            float s = -2. * M_PI * (float)iR / ((float)circle_resolution);
+            named_polygons.back().pts.push_back(float3{cos(s), sin(s) + 1, -d});
+        }
+    }
+}
+
+std::vector<std::string> camera_positions = {
+    // default
+    "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
+    "\"projectionMode\":\"Perspective\",\"viewMat\":[1.0,-0.0,0.0,-0.0,0.0,0."
+    "997785151004791,-0.0665190145373344,-0.0,-0.0,0.0665190145373344,0."
+    "997785151004791,-4.50998878479004,0.0,0.0,0.0,1.0],\"windowHeight\":1015,"
+    "\"windowWidth\":1457}",
+    // nonconvex planar quad
+    "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
+    "\"projectionMode\":\"Perspective\",\"viewMat\":[-0.998822569847107,5."
+    "355104804039e-09,-0.0485050119459629,-0.216645479202271,-0."
+    "0358295626938343,0.674063801765442,0.737804353237152,0.165525689721107,0."
+    "0326956212520599,0.738674163818359,-0.673270523548126,-2.33209872245789,0."
+    "0,0.0,0.0,1.0],\"windowHeight\":1015,\"windowWidth\":1457}",
+    // nonconvex nonplanar quad
+    "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
+    "\"projectionMode\":\"Perspective\",\"viewMat\":[-0.171657741069794,-7."
+    "56699591875076e-10,-0.985156536102295,7.5669963350844e-11,-0."
+    "717151820659637,0.685624599456787,0.124959386885166,0.0312160551548004,0."
+    "675447225570679,0.72795706987381,-0.117692723870277,-3.24677133560181,0.0,"
+    "0.0,0.0,1.0],\"windowHeight\":1015,\"windowWidth\":1457}",
+    // planar octagon
+    "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
+    "\"projectionMode\":\"Perspective\",\"viewMat\":[-0.999916672706604,-3."
+    "63797880709171e-10,-0.0128343626856804,-0.0905372425913811,-0."
+    "00934288371354342,0.685624301433563,0.727900147438049,0.164369627833366,0."
+    "00879903137683868,0.727957427501678,-0.685569226741791,-3.2100293636322,0."
+    "0,0.0,0.0,1.0],\"windowHeight\":1015,\"windowWidth\":1457}",
+    // nice nonplanar octagon
+    "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
+    "\"projectionMode\":\"Perspective\",\"viewMat\":[0.987349390983582,-2."
+    "3283064365387e-10,0.158559530973434,-0.0699826627969742,0."
+    "0682378336787224,0.902657330036163,-0.424917191267014,-0.179787904024124,-"
+    "0.143124654889107,0.430361896753311,0.891238331794739,-2.61236953735352,0."
+    "0,0.0,0.0,1.0],\"windowHeight\":1015,\"windowWidth\":1457}",
+    // approaching circles
+    "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
+    "\"projectionMode\":\"Perspective\",\"viewMat\":[0.000446119578555226,-3."
+    "51883500115946e-09,0.999999165534973,-0.0651277303695679,0."
+    "437462627887726,0.899236857891083,-0.000195159620488994,-0."
+    "594492673873901,-0.899236619472504,0.437462538480759,0.000401298108045012,"
+    "-4.23821687698364,0.0,0.0,0.0,1.0],\"windowHeight\":1015,\"windowWidth\":"
+    "1457}"
+    // done
+};
+
+// std::vector<float3> pts{float3{1, 0, 1}, float3{0, 0.1, -1}, float3{-1, 0,
+// 1},
+//                         float3{0, -0.1, -.5}};
 
 float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
@@ -36,7 +149,9 @@ bool use_extrapolation    = false;
 bool use_newton           = false;
 bool fixed_step_count     = false;
 
-std::vector<std::array<glm::vec3, 3>> sphere_tracing_mesh;
+SimplePolygonMesh sphere_tracing_mesh;
+std::vector<std::pair<std::string, std::vector<Vector3>>>
+    sphere_tracing_mesh_normals;
 std::map<std::string, std::vector<std::array<glm::vec3, 3>>> comparison_meshes;
 fcpw::Scene<3> scene;
 
@@ -125,18 +240,18 @@ std::ostream& operator<<(std::ostream& out, const glm::vec3& vec) {
     return out;
 }
 
-std::vector<std::array<glm::vec3, 3>> mesh_levelset(uint subdivisions = 64) {
+SimplePolygonMesh mesh_levelset(uint subdivisions = 64) {
     std::vector<glm::vec3> glm_pts;
     for (const float3& pt : pts) glm_pts.push_back(to_vec3(pt));
-    std::vector<std::array<glm::vec3, 3>> triangles =
-        triangulate_polygon(glm_pts, subdivisions);
+    glm::vec3 center       = computeVirtualVertex(glm_pts);
+    SimplePolygonMesh mesh = simple_mesh_polygon(glm_pts, center, subdivisions);
 
     //===== Project onto the level set
     // check if p lies on any edge of polygon
-    auto on_boundary = [&](const glm::vec3& p) -> bool {
+    auto on_boundary = [&](const Vector3& p) -> bool {
         for (uint iE = 0; iE < loops[0].y; iE++) {
-            glm::vec3 a = to_vec3(pts[loops[0].x + iE]);
-            glm::vec3 b = to_vec3(pts[loops[0].x + ((iE + 1) % loops[0].y)]);
+            Vector3 a = to_gc(pts[loops[0].x + iE]);
+            Vector3 b = to_gc(pts[loops[0].x + ((iE + 1) % loops[0].y)]);
             if (dist_to_segment(p, a, b) < 1e-8) return true;
         }
         return false;
@@ -145,22 +260,34 @@ std::vector<std::array<glm::vec3, 3>> mesh_levelset(uint subdivisions = 64) {
     // configure harnack params
     float old_epsilon = epsilon;
     epsilon           = fmin(epsilon, 0.0001);
-    for (std::array<glm::vec3, 3>& face : triangles) {
-        for (glm::vec3& vertex : face) {
-            // leave points on boundary fixed
-            if (on_boundary(vertex)) continue;
+    for (Vector3& v : mesh.vertexCoordinates) {
+        // leave points on boundary fixed
+        if (on_boundary(v)) continue;
 
-            glm::vec3 start = vertex - (float)2 * proj_dir;
-            float t;
-            bool projects_onto_levelset = intersect(start, proj_dir, &t);
+        glm::vec3 start = to_vec3(v);
+        float t_up, t_down;
+        bool projects_up_onto_levelset   = intersect(start, proj_dir, &t_up);
+        bool projects_down_onto_levelset = intersect(start, -proj_dir, &t_down);
 
-            if (projects_onto_levelset) vertex = start + t * proj_dir;
+        if (projects_up_onto_levelset && projects_down_onto_levelset) {
+            // if levelset exists in both directions, take closer
+            if (t_up < t_down) {
+                projects_down_onto_levelset = false;
+            } else {
+                projects_up_onto_levelset = false;
+            }
+        }
+
+        if (projects_up_onto_levelset) {
+            v = to_gc(start + t_up * proj_dir);
+        } else if (projects_down_onto_levelset) {
+            v = to_gc(start - t_down * proj_dir);
         }
     }
     // restore old harnack params
     epsilon = old_epsilon;
 
-    return triangles;
+    return mesh;
 }
 
 //====== Experiment code
@@ -420,12 +547,12 @@ void print_test_results() {
     }
 }
 
-void print_camera_view() {
-    glm::vec3 camPos   = camParams.getPosition();
-    glm::vec3 lookDir  = camParams.getLookDir();
-    glm::vec3 upDir    = camParams.getUpDir();
-    glm::vec3 rightDir = camParams.getRightDir();
-    double fovY        = camParams.getFoVVerticalDegrees();
+void print_camera_view(polyscope::CameraParameters params) {
+    glm::vec3 camPos   = params.getPosition();
+    glm::vec3 lookDir  = params.getLookDir();
+    glm::vec3 upDir    = params.getUpDir();
+    glm::vec3 rightDir = params.getRightDir();
+    double fovY        = params.getFoVVerticalDegrees();
 
     glm::mat3 default_cam_mat(rightDir, upDir, lookDir);
     glm::vec3 camSpaceCamPos = inverse(default_cam_mat) * camPos;
@@ -440,11 +567,11 @@ void print_camera_view() {
         << std::endl;
     std::cout << "const vec3 cam_space_cam_pos   = vec3" << camSpaceCamPos
               << ";" << std::endl;
-    std::cout << "const float fovY = " << fovY << ";" << std::endl;
+    std::cout << "const float fovY = " << fovY << ".;" << std::endl;
 }
 
 void build_fcpw_scene() {
-    uint n_triangles = sphere_tracing_mesh.size();
+    uint n_triangles = sphere_tracing_mesh.polygons.size();
     uint n_vertices  = 3 * n_triangles;
 
     // initialize a 3d scene
@@ -458,18 +585,17 @@ void build_fcpw_scene() {
     scene.setObjectVertexCount(n_vertices, 0);
     scene.setObjectTriangleCount(n_triangles, 0);
 
+    // specify the vertex positions
+    for (int iV = 0; iV < sphere_tracing_mesh.vertexCoordinates.size(); iV++) {
+        const Vector3& v = sphere_tracing_mesh.vertexCoordinates[iV];
+        scene.setObjectVertex(to_fcpw(v), iV, 0);
+    }
 
     // specify the triangle indices
     for (int iT = 0; iT < n_triangles; iT++) {
-        std::array<int, 3> indices{3 * iT + 0, 3 * iT + 1, 3 * iT + 2};
+        const std::vector<size_t>& face = sphere_tracing_mesh.polygons[iT];
+        std::array<int, 3> indices{(int)face[0], (int)face[1], (int)face[2]};
         scene.setObjectTriangle(indices.data(), iT, 0);
-
-        // specify the vertex positions
-        const std::array<glm::vec3, 3>& t = sphere_tracing_mesh[iT];
-        for (int iV = 0; iV < 3; iV++) {
-            scene.setObjectVertex(fcpw::Vector<3>{t[iV].x, t[iV].y, t[iV].z},
-                                  3 * iT + iV, 0);
-        }
     }
 
     // once geometry has been specified, build acceleration structure
@@ -482,14 +608,9 @@ void build_fcpw_scene() {
     scene.findClosestPoint(query_point, interaction);
 }
 
-void build_comparison_mesh(
-    std::string comparison_name,
-    const std::function<std::vector<std::array<glm::vec3, 3>>(
-        const std::vector<glm::vec3>&)>& build_mesh) {
-
-    std::vector<glm::vec3> glm_pts;
-    for (const float3& pt : pts) glm_pts.push_back(to_vec3(pt));
-    auto mesh = build_mesh(glm_pts);
+polyscope::SurfaceMesh*
+build_comparison_mesh(std::string comparison_name,
+                      const std::vector<std::array<glm::vec3, 3>>& mesh) {
     std::vector<glm::vec3> positions;
     std::vector<std::vector<size_t>> faceIndices;
     for (size_t iF = 0; iF < mesh.size(); iF++) {
@@ -497,9 +618,84 @@ void build_comparison_mesh(
             positions.size(), positions.size() + 1, positions.size() + 2});
         for (size_t i = 0; i < 3; i++) positions.push_back(mesh[iF][i]);
     }
-    polyscope::registerSurfaceMesh(comparison_name + " mesh", positions,
-                                   faceIndices);
     comparison_meshes[comparison_name] = mesh;
+    return polyscope::registerSurfaceMesh(comparison_name + " mesh", positions,
+                                          faceIndices);
+}
+
+polyscope::SurfaceMesh*
+build_comparison_mesh(std::string comparison_name,
+                      const std::function<std::vector<std::array<glm::vec3, 3>>(
+                          const std::vector<glm::vec3>&)>& build_mesh) {
+
+    std::vector<glm::vec3> glm_pts;
+    for (const float3& pt : pts) glm_pts.push_back(to_vec3(pt));
+    auto mesh = build_mesh(glm_pts);
+    return build_comparison_mesh(comparison_name, mesh);
+}
+
+void export_polygons_to_shadertoy() {
+    polyscope::CameraParameters prev_params =
+        polyscope::view::getCameraParametersForCurrentView();
+
+    std::cout << "//====== named polygons" << std::endl;
+    for (size_t iP = 0; iP < named_polygons.size(); iP++) {
+        std::cout << "//  P" << iP << " : " << named_polygons[iP].name
+                  << std::endl;
+    }
+    std::cout << "#define P0" << std::endl << std::endl;
+
+    std::cout << "//====== polygon data" << std::endl;
+    for (size_t iP = 0; iP < named_polygons.size(); iP++) {
+        std::cout << "#ifdef P" << iP << std::endl;
+        std::cout << "#define nV " << named_polygons[iP].pts.size()
+                  << std::endl;
+        std::cout << "vec3 points[nV] = vec3[](";
+        for (size_t iPt = 0; iPt < named_polygons[iP].pts.size(); iPt++) {
+            const float3& pt = named_polygons[iP].pts[iPt];
+            std::cout << "vec3( " << pt.x << ", " << pt.y << ", " << pt.z
+                      << " )";
+            if (iPt + 1 < named_polygons[iP].pts.size()) std::cout << ", ";
+        }
+        std::cout << " );" << std::endl;
+
+        std::cout << "#define nE " << named_polygons[iP].pts.size()
+                  << std::endl;
+        std::cout << "vec2 edges[nE] = vec2[](";
+        for (size_t iL = 0; iL < named_polygons[iP].loops.size(); iL++) {
+            const uint3& loop = named_polygons[iP].loops[iL];
+            for (size_t iPt = 0; iPt < loop.y; iPt++) {
+                std::cout << "vec2( " << loop.x + iPt << ", "
+                          << (loop.x + ((iPt + 1) % loop.y)) << " )";
+                if (iPt + 1 < loop.y) std::cout << ", ";
+            }
+            if (iL + 1 < named_polygons[iP].loops.size()) std::cout << ", ";
+        }
+        std::cout << " );" << std::endl;
+
+        polyscope::view::setCameraFromJson(
+            camera_positions[named_polygons[iP].cam_view], false);
+        print_camera_view(polyscope::view::getCameraParametersForCurrentView());
+
+
+        std::cout << "#endif // P" << iP << std::endl;
+    }
+
+
+    polyscope::view::setViewToCamera(prev_params);
+}
+
+polyscope::CurveNetwork* drawPolygon(const std::vector<float3>& pts,
+                                     const std::vector<uint3>& loops) {
+    std::vector<std::array<size_t, 2>> polygon_segments;
+    for (size_t iL = 0; iL < loops.size(); iL++) {
+        const uint3& loop = loops[iL];
+        for (size_t iPt = 0; iPt < loop.y; iPt++) {
+            polygon_segments.push_back(std::array<size_t, 2>{
+                loop.x + iPt, loop.x + ((iPt + 1) % loop.y)});
+        }
+    }
+    return polyscope::registerCurveNetwork("polygon", pts, polygon_segments);
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -519,8 +715,11 @@ void myCallback() {
     if (ImGui::Button("Restore Camera View")) {
         polyscope::view::setViewToCamera(camParams);
     }
-    if (ImGui::Button("Print Camera View")) {
-        print_camera_view();
+    if (ImGui::Button("Print ShaderToy Camera Parameters")) {
+        print_camera_view(camParams);
+    }
+    if (ImGui::Button("Print Camera JSON")) {
+        std::cout << polyscope::view::getCameraJson() << std::endl;
     }
     if (ImGui::Button("Print log")) {
         print_test_results();
@@ -533,80 +732,265 @@ void myCallback() {
         shootCameraRays("normalstep");
         print_test_results();
     }
-    if (ImGui::Button("Build Sphere Tracing Mesh")) {
-        sphere_tracing_mesh = mesh_levelset();
-        std::vector<glm::vec3> positions;
-        std::vector<std::vector<size_t>> faceIndices;
-        for (size_t iF = 0; iF < sphere_tracing_mesh.size(); iF++) {
-            faceIndices.push_back(std::vector<size_t>{
-                positions.size(), positions.size() + 1, positions.size() + 2});
-            for (size_t i = 0; i < 3; i++)
-                positions.push_back(sphere_tracing_mesh[iF][i]);
-        }
-        polyscope::registerSurfaceMesh("mesh", positions, faceIndices);
-        build_fcpw_scene();
-    }
-    if (ImGui::Button("Sphere Trace")) {
-        std::string name =
-            std::string(use_grad_termination ? "grad-terminated " : "") +
-            std::string(use_overstepping ? "overstepped " : "") +
-            std::string(use_extrapolation ? "extrapolated " : "") +
-            std::string(use_newton ? "newton-accelerated " : "");
-        if (name.length() == 0) name = "default ";
-        name += "sphere tracing";
-        shootCameraRays(name, TracingMethod::Sphere);
-    }
     if (ImGui::Button("Save Convergence Statistics")) {
         write_convergence_statistics();
     }
-    ImGui::Separator();
-    if (ImGui::Button("Build Wachpress Mesh")) {
-        build_comparison_mesh("wachpress", wachpressInterpolate);
-    }
-    if (ImGui::Button("Build Mean Value Mesh")) {
-        build_comparison_mesh("mean_value", meanValueInterpolate);
-    }
-    if (ImGui::Button("Build Astrid Mesh")) {
-        build_comparison_mesh("astrid", astridInterpolate);
-    }
-    if (ImGui::Button("Build Bilinear Mesh")) {
-        if (pts.size() == 4) {
-            build_comparison_mesh("bilinear", bilinearInterpolate);
-        } else {
-            polyscope::warning("Bilinear interpolation only makes sense if the "
-                               "polygon has four sizes, but this polygon has " +
-                               std::to_string(pts.size()) + " sides");
+    if (ImGui::TreeNode("Sphere Tracing")) {
+        if (ImGui::Button("Build Small Sphere Tracing Mesh")) {
+            sphere_tracing_mesh = mesh_levelset(3);
+            polyscope::registerSurfaceMesh(
+                "mesh", sphere_tracing_mesh.vertexCoordinates,
+                sphere_tracing_mesh.polygons);
+            build_fcpw_scene();
         }
-    }
-    if (ImGui::Button("Build Minimal Surface")) {
-        build_comparison_mesh("minimal", minimalSurface);
-    }
-    if (ImGui::Button("Save Comparison Meshes")) {
-        std::cout << "Writing meshes:" << vendl;
-        for (auto const& comparison : comparison_meshes) {
-            geometrycentral::surface::SimplePolygonMesh mesh;
-            compute_vertex_face_lists(comparison.second, mesh.vertexCoordinates,
-                                      mesh.polygons);
-            std::string filename = comparison.first + "_mesh.obj";
-            std::cout << "  Writing " << filename << "..." << vendl;
-            mesh.writeMesh(filename, "obj");
+        if (ImGui::Button("Build Sphere Tracing Mesh")) {
+            sphere_tracing_mesh = mesh_levelset();
+            polyscope::registerSurfaceMesh(
+                "mesh", sphere_tracing_mesh.vertexCoordinates,
+                sphere_tracing_mesh.polygons);
+            build_fcpw_scene();
         }
-        std::cout << "Done writing meshes" << vendl;
+        if (ImGui::Button("Compute Sphere Tracing Normals")) {
+            sphere_tracing_mesh_normals =
+                std::vector<std::pair<std::string, std::vector<Vector3>>>{
+                    std::make_pair("nicole", std::vector<Vector3>{}),
+                    std::make_pair("finite_differences",
+                                   std::vector<Vector3>{}),
+                    std::make_pair("architecture", std::vector<Vector3>{})};
+
+            for (size_t iV = 0;
+                 iV < sphere_tracing_mesh.vertexCoordinates.size(); iV++) {
+                Vector3 v = sphere_tracing_mesh.vertexCoordinates[iV];
+                for (size_t i = 0; i < 3; i++) {
+                    Vector3 n = to_gc(ray_nonplanar_polygon_normal_T<double>(
+                        to_float3(v), loops.data(), pts.data(), 1, i));
+                    sphere_tracing_mesh_normals[i].second.push_back(n);
+                }
+            }
+
+            for (size_t i = 0; i < 3; i++) {
+                polyscope::getSurfaceMesh("mesh")->addVertexVectorQuantity(
+                    "normals (" + sphere_tracing_mesh_normals[i].first + ")",
+                    sphere_tracing_mesh_normals[i].second);
+            }
+        }
+        if (ImGui::Button("Sphere Trace")) {
+            std::string name =
+                std::string(use_grad_termination ? "grad-terminated " : "") +
+                std::string(use_overstepping ? "overstepped " : "") +
+                std::string(use_extrapolation ? "extrapolated " : "") +
+                std::string(use_newton ? "newton-accelerated " : "");
+            if (name.length() == 0) name = "default ";
+            name += "sphere tracing";
+            shootCameraRays(name, TracingMethod::Sphere);
+        }
+        if (ImGui::Button("Save sphere tracing normals")) {
+            std::array<std::vector<Vector3>, 3> point_faces;
+            for (size_t i = 0; i < 3; i++)
+                point_faces[i] =
+                    generate_point_faces(sphere_tracing_mesh.vertexCoordinates,
+                                         sphere_tracing_mesh_normals[i].second);
+
+            std::vector<std::vector<size_t>> face_vertex_indices;
+            for (size_t iF = 0; iF < point_faces[0].size(); iF++)
+                face_vertex_indices.push_back(
+                    std::vector<size_t>{3 * iF, 3 * iF + 1, 3 * iF + 2});
+
+            for (size_t i = 0; i < 3; i++) {
+                SimplePolygonMesh cloud_tris(face_vertex_indices,
+                                             point_faces[i]);
+                cloud_tris.writeMesh(
+                    "normals_" + sphere_tracing_mesh_normals[i].first + ".obj",
+                    "obj");
+            }
+        }
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Other Meshes")) {
+        if (ImGui::Button("Build Wachpress Mesh")) {
+            build_comparison_mesh("wachpress", wachpressInterpolate);
+        }
+        if (ImGui::Button("Build Mean Value Mesh")) {
+            build_comparison_mesh("mean_value", meanValueInterpolate);
+        }
+        if (ImGui::Button("Build Astrid Mesh")) {
+            build_comparison_mesh("astrid", astridInterpolate);
+        }
+        if (ImGui::Button("Build Bilinear Mesh")) {
+            if (pts.size() == 4) {
+                build_comparison_mesh("bilinear", bilinearInterpolate);
+            } else {
+                polyscope::warning(
+                    "Bilinear interpolation only makes sense if the "
+                    "polygon has four sizes, but this polygon has " +
+                    std::to_string(pts.size()) + " sides");
+            }
+        }
+        if (ImGui::Button("Build Minimal Surface")) {
+            build_comparison_mesh("minimal", minimalSurface);
+        }
+        if (ImGui::Button("Save Comparison Meshes")) {
+            std::cout << "Writing meshes:" << vendl;
+            for (auto const& comparison : comparison_meshes) {
+                geometrycentral::surface::SimplePolygonMesh mesh;
+                compute_vertex_face_lists(
+                    comparison.second, mesh.vertexCoordinates, mesh.polygons);
+                std::string filename = comparison.first + "_mesh.obj";
+                std::cout << "  Writing " << filename << "..." << vendl;
+                mesh.writeMesh(filename, "obj");
+            }
+            std::cout << "Done writing meshes" << vendl;
+        }
+        ImGui::TreePop();
     }
 
-    ImGui::Separator();
-    ImGui::SliderFloat("epsilon (log)", &epsilon, .00000001f, .0001f, "%.4f",
-                       ImGuiSliderFlags_Logarithmic);
-    ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
-    ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
-    ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 50000);
-    ImGui::DragInt("resolution x", &resolution_x, 1, 1, 2000);
-    ImGui::DragInt("resolution y", &resolution_y, 1, 1, 2000);
-    ImGui::Checkbox("use_grad_termination", &use_grad_termination);
-    ImGui::Checkbox("use_overstepping", &use_overstepping);
-    ImGui::Checkbox("use_extrapolation", &use_extrapolation);
-    ImGui::Checkbox("use_newton", &use_newton);
-    ImGui::Checkbox("fixed_step_count", &fixed_step_count);
+    if (ImGui::TreeNode("Parameters")) {
+        ImGui::SliderFloat("epsilon (log)", &epsilon, .00000001f, .0001f,
+                           "%.4f", ImGuiSliderFlags_Logarithmic);
+        ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
+        ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
+        ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 50000);
+        ImGui::DragInt("resolution x", &resolution_x, 1, 1, 2000);
+        ImGui::DragInt("resolution y", &resolution_y, 1, 1, 2000);
+        ImGui::Checkbox("use_grad_termination", &use_grad_termination);
+        ImGui::Checkbox("use_overstepping", &use_overstepping);
+        ImGui::Checkbox("use_extrapolation", &use_extrapolation);
+        ImGui::Checkbox("use_newton", &use_newton);
+        ImGui::Checkbox("fixed_step_count", &fixed_step_count);
+        ImGui::TreePop();
+    }
+    static std::vector<const char*> polygon_names;
+    if (polygon_names.empty())
+        for (auto& poly : named_polygons)
+            polygon_names.push_back(poly.name.c_str());
+    static int selected_polygon = 0;
+    if (ImGui::TreeNode("Experiments")) {
+        auto display_polygon = [&](size_t iP) {
+            pts          = named_polygons[iP].pts;
+            loops        = named_polygons[iP].loops;
+            auto polygon = drawPolygon(pts, loops);
+            polygon->setColor(glm::vec3(0));
+            // set soft shadows on the ground
+            polyscope::options::groundPlaneMode =
+                polyscope::GroundPlaneMode::ShadowOnly;
+            polyscope::options::groundPlaneHeightFactor = 0.00; // adjust the
+            // plane height
+            polyscope::options::shadowDarkness = 0.15; // lighter shadows
+        };
+        if (ImGui::Combo("Select Polygon", &selected_polygon,
+                         polygon_names.data(), polygon_names.size())) {
+            display_polygon(selected_polygon);
+        }
+        if (ImGui::Button("View From Polygon Camera")) {
+            polyscope::view::setCameraFromJson(
+                camera_positions[named_polygons[selected_polygon].cam_view],
+                false);
+        }
+        if (ImGui::Button("Render All Polygons")) {
+            for (size_t iP = 0; iP < named_polygons.size(); iP++) {
+                display_polygon(iP);
+                polyscope::view::setCameraFromJson(
+                    camera_positions[named_polygons[iP].cam_view], false);
+                std::string polygon_name = named_polygons[iP].name;
+
+                size_t nL = named_polygons[iP].loops.size();
+                if (nL == 2) {
+                    // special case where we only do minimal surfaces
+                    polyscope::screenshot(polygon_name + "--outline.png");
+
+                    // first try optimizing boundary components separately
+                    const std::vector<float3>& pts = named_polygons[iP].pts;
+                    uint3 loop_a = named_polygons[iP].loops[0];
+                    uint3 loop_b = named_polygons[iP].loops[1];
+                    std::vector<glm::vec3> pts_a, pts_b;
+                    for (size_t iA = 0; iA < loop_a.y; iA++)
+                        pts_a.push_back(to_vec3(pts[loop_a.x + iA]));
+                    for (size_t iB = 0; iB < loop_b.y; iB++)
+                        pts_b.push_back(to_vec3(pts[loop_b.x + iB]));
+
+                    // HACK : TKTKTKTKT : what's the deal with boundary loop
+                    // orientations? why do solid angle and minimal surfaces
+                    // disagree?
+                    for (glm::vec3& p_b : pts_b) p_b.y = 2. - p_b.y;
+
+                    double area_a, area_b;
+                    std::vector<std::array<glm::vec3, 3>> side_a =
+                        minimalSurfaceArea(pts_a, &area_a);
+                    std::vector<std::array<glm::vec3, 3>> side_b =
+                        minimalSurfaceArea(pts_b, &area_b);
+
+                    double area_tube;
+                    std::vector<std::array<glm::vec3, 3>> tube;
+                    try {
+                        tube = minimalSurfaceArea(pts_a, pts_b, &area_tube);
+                    } catch (std::logic_error& e) {
+                        // if mesh degenerates, set big area so we choose the
+                        // other option
+                        area_tube = 999;
+                    }
+
+                    polyscope::SurfaceMesh* psMesh;
+                    if (area_tube < area_a + area_b) {
+                        psMesh = build_comparison_mesh("minimal", tube);
+                    } else {
+                        side_a.insert(side_a.end(), side_b.begin(),
+                                      side_b.end());
+                        psMesh = build_comparison_mesh("minimal", side_a);
+                    }
+                    psMesh->setTransparency(0.75)->setEnabled(true);
+                    polyscope::screenshot(polygon_name + "--minimal.png");
+                    psMesh->setEnabled(false);
+                    // polyscope::show();
+                    continue;
+                } else if (nL > 2) {
+                    polyscope::warning("Minimal surfaces with >2 boundary "
+                                       "components not supported");
+                    continue;
+                }
+
+                polyscope::screenshot(polygon_name + "--outline.png");
+
+                auto psMesh =
+                    build_comparison_mesh("wachpress", wachpressInterpolate)
+                        ->setTransparency(0.75);
+                psMesh->setEnabled(true);
+                polyscope::screenshot(polygon_name + "--wachpress.png");
+                psMesh->setEnabled(false);
+
+                psMesh =
+                    build_comparison_mesh("mean_value", meanValueInterpolate)
+                        ->setTransparency(0.75);
+                psMesh->setEnabled(true);
+                polyscope::screenshot(polygon_name + "--mean_value.png");
+                psMesh->setEnabled(false);
+
+                psMesh = build_comparison_mesh("astrid", astridInterpolate)
+                             ->setTransparency(0.75);
+                psMesh->setEnabled(true);
+                polyscope::screenshot(polygon_name + "--astrid.png");
+                psMesh->setEnabled(false);
+
+                psMesh = build_comparison_mesh("minimal", minimalSurface)
+                             ->setTransparency(0.75);
+                psMesh->setEnabled(true);
+                polyscope::screenshot(polygon_name + "--minimal.png");
+                psMesh->setEnabled(false);
+
+                if (pts.size() == 4) {
+                    psMesh =
+                        build_comparison_mesh("bilinear", bilinearInterpolate)
+                            ->setTransparency(0.75);
+                    psMesh->setEnabled(true);
+                    polyscope::screenshot(polygon_name + "--bilinear.png");
+                    psMesh->setEnabled(false);
+                }
+            }
+        }
+        if (ImGui::Button("Export Polygons to ShaderToy")) {
+            export_polygons_to_shadertoy();
+        }
+        ImGui::TreePop();
+    }
 }
 
 int main(int argc, char** argv) {
@@ -627,6 +1011,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    construct_approaching_circles();
+
     // Initialize polyscope
     polyscope::init();
 
@@ -635,6 +1021,8 @@ int main(int argc, char** argv) {
 
     polyscope::registerCurveNetworkLoop("polygon", pts);
 
+    // store initial camera position
+    camParams = polyscope::view::getCameraParametersForCurrentView();
     // shootCameraRays();
 
     // Give control to the polyscope gui

@@ -35,3 +35,12 @@ astridInterpolate(const std::vector<glm::vec3>& pts);
 
 std::vector<std::array<glm::vec3, 3>>
 minimalSurface(const std::vector<glm::vec3>& pts);
+
+std::vector<std::array<glm::vec3, 3>>
+minimalSurfaceArea(const std::vector<glm::vec3>& pts, double* area);
+
+std::vector<std::array<glm::vec3, 3>>
+minimalSurfaceArea(const std::vector<glm::vec3>& pts_a,
+                   const std::vector<glm::vec3>& pts_b, double* area = nullptr);
+
+glm::vec3 computeVirtualVertex(const std::vector<glm::vec3>& pts);

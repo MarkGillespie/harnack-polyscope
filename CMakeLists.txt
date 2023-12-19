@@ -16,6 +16,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 message(STATUS "cmake build type: ${CMAKE_BUILD_TYPE}")
 
+# == Set module path (for FindX.cmake files, etc)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
 ### Configure the compiler
 # This is a basic, decent setup that should do something sane on most compilers
 
@@ -31,12 +34,13 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" OR "${CMAKE_CXX_COMPILER_ID}" STR
     message("Setting clang-specific options")
     SET(BASE_CXX_FLAGS "${BASE_CXX_FLAGS} -ferror-limit=3 -fcolor-diagnostics")
     SET(CMAKE_CXX_FLAGS_DEBUG          "-fsanitize=address -fno-limit-debug-info")
+
+    # fcpw triggers a lot of these
+    SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} -Wno-sign-compare")
   elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
     message("Setting gcc-specific options")
     SET(BASE_CXX_FLAGS "${BASE_CXX_FLAGS} -fmax-errors=5")
     SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} -Wno-maybe-uninitialized -Wno-format-zero-length -Wno-unused-but-set-parameter -Wno-unused-but-set-variable")
-    # fcpw triggers a lot of these
-    SET(DISABLED_WARNINGS "${DISABLED_WARNINGS} -Wno-sign-compare")
   endif()
 
   SET(CMAKE_CXX_FLAGS "${BASE_CXX_FLAGS} ${DISABLED_WARNINGS}")

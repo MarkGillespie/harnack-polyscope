@@ -1,20 +1,31 @@
 #pragma once
-#include "fcpw/fcpw.h"                         // fcpw::Vector
-#include "geometrycentral/utilities/vector3.h" // Vector3
-#include "harnack.h"                           // acceleration_stats
-#include "polyscope/polyscope.h"               // glm
+#include "fcpw/fcpw.h"                                   // fcpw::Vector
+#include "geometrycentral/surface/simple_polygon_mesh.h" // SimplePolygonMesh
+#include "geometrycentral/utilities/vector3.h"           // Vector3
+#include "harnack.h"                                     // acceleration_stats
+#include "polyscope/polyscope.h"                         // glm
 
-inline float dist_to_segment(const glm::vec3& x, const glm::vec3& p1,
-                             const glm::vec3& p2) {
-    glm::vec3 m = p2 - p1;
-    glm::vec3 v = x - p1;
+inline float dist_to_segment(const geometrycentral::Vector3& x,
+                             const geometrycentral::Vector3& p1,
+                             const geometrycentral::Vector3& p2) {
+    geometrycentral::Vector3 m = p2 - p1;
+    geometrycentral::Vector3 v = x - p1;
     // dot = |a|*|b|cos(theta) * n, isolating |a|sin(theta)
     float t = fmin(fmax(dot(m, v) / dot(m, m), 0.), 1.);
-    return length(v - t * m);
+    return (v - t * m).norm();
 }
 
-inline fcpw::Vector<3> to_fcpw(glm::vec3 v) {
-    return fcpw::Vector<3>{v.x, v.y, v.z};
+inline fcpw::Vector<3> to_fcpw(glm::vec3 v) { return {v.x, v.y, v.z}; }
+
+inline fcpw::Vector<3> to_fcpw(geometrycentral::Vector3 v) {
+    return {v.x, v.y, v.z};
+}
+
+inline geometrycentral::Vector3 to_gc(float3 v) { return {v.x, v.y, v.z}; }
+inline geometrycentral::Vector3 to_gc(glm::vec3 v) { return {v.x, v.y, v.z}; }
+inline glm::vec3 to_vec3(geometrycentral::Vector3 v) { return {v.x, v.y, v.z}; }
+inline float3 to_float3(geometrycentral::Vector3 v) {
+    return {(float)v.x, (float)v.y, (float)v.z};
 }
 
 typedef struct sphere_trace_intersection_params {
@@ -114,12 +125,9 @@ sphere_trace_intersection(const sphere_trace_intersection_params& params,
 
 template <typename T>
 std::vector<std::array<T, 3>>
-triangulate_polygon(const std::vector<T>& vertices, uint subdivisions) {
+triangulate_polygon(const std::vector<T>& vertices, T center,
+                    uint subdivisions) {
     std::vector<std::array<T, 3>> triangles;
-
-    T center = T(0);
-    for (const T& pt : vertices) center += pt;
-    center /= (float)vertices.size();
 
     //===== Build some surface filling in the curve
     for (uint iE = 0; iE < vertices.size(); iE++) {
@@ -155,7 +163,48 @@ triangulate_polygon(const std::vector<T>& vertices, uint subdivisions) {
     return triangles;
 }
 
+template <typename T>
+std::vector<std::array<T, 3>>
+triangulate_polygon(const std::vector<T>& vertices, uint subdivisions) {
+    T center = T(0);
+    for (const T& pt : vertices) center += pt;
+    center /= (float)vertices.size();
+    return triangulate_polygon(vertices, center, subdivisions);
+}
+
 void compute_vertex_face_lists(
     const std::vector<std::array<glm::vec3, 3>>& tri_list,
     std::vector<geometrycentral::Vector3>& vertex_coordinates,
     std::vector<std::vector<size_t>>& faces, double epsilon = 1e-5);
+
+inline geometrycentral::surface::SimplePolygonMesh
+simple_mesh_polygon(const std::vector<glm::vec3>& vertices, uint subdivisions) {
+
+    geometrycentral::surface::SimplePolygonMesh mesh;
+    std::vector<std::array<glm::vec3, 3>> triangles =
+        triangulate_polygon(vertices, subdivisions);
+    compute_vertex_face_lists(triangles, mesh.vertexCoordinates, mesh.polygons);
+    return mesh;
+}
+
+inline geometrycentral::surface::SimplePolygonMesh
+simple_mesh_polygon(const std::vector<glm::vec3>& vertices, glm::vec3& center,
+                    uint subdivisions) {
+
+    geometrycentral::surface::SimplePolygonMesh mesh;
+    std::vector<std::array<glm::vec3, 3>> triangles =
+        triangulate_polygon(vertices, center, subdivisions);
+    compute_vertex_face_lists(triangles, mesh.vertexCoordinates, mesh.polygons);
+    return mesh;
+}
+
+// generate a small face of radius epsilon at each point with the corresponding
+// normal vector
+std::vector<geometrycentral::Vector3>
+generate_point_faces(const std::vector<geometrycentral::Vector3>& points,
+                     const std::vector<geometrycentral::Vector3>& normals,
+                     double epsilon = .05);
+
+
+void branchlessONB(const geometrycentral::Vector3& n,
+                   geometrycentral::Vector3& b1, geometrycentral::Vector3& b2);

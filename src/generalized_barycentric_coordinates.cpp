@@ -6,6 +6,7 @@
 #include "geometrycentral/numerical/linear_solvers.h"
 #include "geometrycentral/surface/manifold_surface_mesh.h"
 #include "geometrycentral/surface/simple_polygon_mesh.h"
+#include "geometrycentral/surface/subdivide.h"
 #include "geometrycentral/surface/surface_mesh_factories.h"
 #include "geometrycentral/surface/vertex_position_geometry.h"
 
@@ -122,11 +123,6 @@ meanValueInterpolate(const std::vector<glm::vec3>& pts) {
     return barycentricInterpolate(pts, meanValueCoords);
 }
 
-// compute generalized barycentric coordinates for point v0 inside of the
-// quadrilateral v using bilinear interpolation
-std::vector<double> bilinearCoords(glm::vec2 v0,
-                                   const std::vector<glm::vec2>& v) {}
-
 std::vector<std::array<glm::vec3, 3>> barycentricInterpolate(
     const std::vector<glm::vec3>& pts,
     const std::function<std::vector<double>(glm::vec2,
@@ -193,6 +189,189 @@ bilinearInterpolate(const std::vector<glm::vec3>& pts) {
             triangles.push_back(std::array<glm::vec3, 3>{
                 interp(s0, t0), interp(s1, t1), interp(s0, t1)});
         }
+    }
+    return triangles;
+}
+
+std::vector<std::array<glm::vec3, 3>>
+astridInterpolate(const std::vector<glm::vec3>& pts) {
+    glm::vec3 center = computeVirtualVertex(pts);
+    std::vector<std::array<glm::vec3, 3>> triangles;
+    for (size_t iE = 0; iE < pts.size(); iE++) {
+        triangles.push_back(std::array<glm::vec3, 3>{
+            pts[iE], pts[(iE + 1) % pts.size()], center});
+    }
+    return triangles;
+}
+
+void flowToMinimalSurface(
+    geometrycentral::surface::ManifoldSurfaceMesh& mesh,
+    geometrycentral::surface::VertexPositionGeometry& geom, double* area) {
+    using namespace geometrycentral;
+    using namespace geometrycentral::surface;
+
+    VertexData<bool> is_interior(mesh, true);
+    for (BoundaryLoop b : mesh.boundaryLoops()) {
+        for (Vertex v : b.adjacentVertices()) is_interior[v] = false;
+    }
+
+    geom.requireCotanLaplacian();
+    geom.requireVertexIndices();
+
+    auto read_positions = [&](Vector<double>& x, Vector<double>& y,
+                              Vector<double>& z) {
+        const VertexData<size_t>& iV = geom.vertexIndices;
+        for (Vertex v : mesh.vertices()) {
+            x(iV[v]) = geom.vertexPositions[v].x;
+            y(iV[v]) = geom.vertexPositions[v].y;
+            z(iV[v]) = geom.vertexPositions[v].z;
+        }
+    };
+
+    auto set_positions = [&](const Vector<double>& x, const Vector<double>& y,
+                             const Vector<double>& z) {
+        const VertexData<size_t>& iV = geom.vertexIndices;
+        for (Vertex v : mesh.vertices()) {
+            geom.vertexPositions[v].x = x(iV[v]);
+            geom.vertexPositions[v].y = y(iV[v]);
+            geom.vertexPositions[v].z = z(iV[v]);
+        }
+    };
+
+    size_t N = mesh.nVertices();
+    Vector<double> x(N), y(N), z(N), x_int, x_bdy, y_int, y_bdy, z_int, z_bdy;
+
+    double change = 1;
+    size_t iter   = 0;
+    while (change > 1e-3 && iter < 25) {
+        SparseMatrix<double> L = geom.cotanLaplacian;
+        BlockDecompositionResult<double> decomp =
+            blockDecomposeSquare(L, is_interior.raw());
+
+        read_positions(x, y, z);
+        decomposeVector(decomp, x, x_int, x_bdy);
+        decomposeVector(decomp, y, y_int, y_bdy);
+        decomposeVector(decomp, z, z_int, z_bdy);
+
+        PositiveDefiniteSolver<double> solver(decomp.AA);
+        x_int = solver.solve(-decomp.AB * x_bdy);
+        y_int = solver.solve(-decomp.AB * y_bdy);
+        z_int = solver.solve(-decomp.AB * z_bdy);
+
+        Vector<double> new_x, new_y, new_z;
+        new_x = reassembleVector(decomp, x_int, x_bdy);
+        new_y = reassembleVector(decomp, y_int, y_bdy);
+        new_z = reassembleVector(decomp, z_int, z_bdy);
+
+        change = (new_x - x).squaredNorm() + (new_y - y).squaredNorm() +
+                 (new_z - z).squaredNorm();
+
+        set_positions(new_x, new_y, new_z);
+
+        x = new_x;
+        y = new_y;
+        z = new_z;
+        geom.refreshQuantities();
+
+        iter++;
+    }
+
+    geom.unrequireVertexIndices();
+    geom.unrequireCotanLaplacian();
+
+    if (area) {
+        *area = 0;
+        geom.requireFaceAreas();
+        for (Face f : mesh.faces()) *area += geom.faceAreas[f];
+        geom.unrequireFaceAreas();
+    }
+}
+
+std::vector<std::array<glm::vec3, 3>>
+minimalSurface(const std::vector<glm::vec3>& pts) {
+    return minimalSurfaceArea(pts, nullptr);
+}
+
+std::vector<std::array<glm::vec3, 3>>
+minimalSurfaceArea(const std::vector<glm::vec3>& pts, double* area) {
+    using namespace geometrycentral;
+    using namespace geometrycentral::surface;
+
+    uint subdivisions = 64;
+
+    glm::vec3 center = computeVirtualVertex(pts);
+    center.x += 2.7;
+    center.y += 5;
+    std::vector<std::array<glm::vec3, 3>> init_positions =
+        triangulate_polygon(pts, center, subdivisions);
+
+    SimplePolygonMesh smp;
+    compute_vertex_face_lists(init_positions, smp.vertexCoordinates,
+                              smp.polygons);
+
+    std::unique_ptr<ManifoldSurfaceMesh> mesh;
+    std::unique_ptr<VertexPositionGeometry> geom;
+    std::tie(mesh, geom) =
+        makeManifoldSurfaceMeshAndGeometry(smp.polygons, smp.vertexCoordinates);
+
+    flowToMinimalSurface(*mesh, *geom, area);
+
+    std::vector<std::array<glm::vec3, 3>> triangles;
+    const VertexData<Vector3>& p = geom->vertexPositions;
+    for (Face f : mesh->faces()) {
+        Vector3 pi = p[f.halfedge().tailVertex()];
+        Vector3 pj = p[f.halfedge().tipVertex()];
+        Vector3 pk = p[f.halfedge().next().tipVertex()];
+        triangles.push_back(std::array<glm::vec3, 3>{
+            glm::vec3{pi.x, pi.y, pi.z}, glm::vec3{pj.x, pj.y, pj.z},
+            glm::vec3{pk.x, pk.y, pk.z}});
+    }
+    return triangles;
+}
+
+std::vector<std::array<glm::vec3, 3>>
+minimalSurfaceArea(const std::vector<glm::vec3>& pts_a,
+                   const std::vector<glm::vec3>& pts_b, double* area) {
+    using namespace geometrycentral;
+    using namespace geometrycentral::surface;
+    std::vector<Vector3> positions;
+    std::vector<std::vector<size_t>> polygons;
+
+    verbose_assert(pts_a.size() == pts_b.size(),
+                   "boundary loops in minimal surface must have same number of "
+                   "components");
+
+    auto to_gc_vec3 = [](glm::vec3 p) -> Vector3 { return {p.x, p.y, p.z}; };
+    size_t N        = pts_a.size();
+    for (size_t iP = 0; iP < N; iP++)
+        positions.push_back(to_gc_vec3(pts_a[iP]));
+    for (size_t iP = 0; iP < N; iP++)
+        positions.push_back(to_gc_vec3(pts_b[iP]));
+
+    for (size_t iP = 0; iP < N; iP++) {
+        size_t jP = (iP + 1) % N;
+        polygons.push_back(std::vector<size_t>{iP, jP, N + jP, N + iP});
+    }
+
+    std::unique_ptr<ManifoldSurfaceMesh> mesh;
+    std::unique_ptr<VertexPositionGeometry> geom;
+    std::tie(mesh, geom) =
+        makeManifoldSurfaceMeshAndGeometry(polygons, positions);
+
+    for (size_t iS = 0; iS < 6; iS++) linearSubdivide(*mesh, *geom);
+    for (Face f : mesh->faces()) mesh->triangulate(f);
+
+    flowToMinimalSurface(*mesh, *geom, area);
+
+    std::vector<std::array<glm::vec3, 3>> triangles;
+    const VertexData<Vector3>& p = geom->vertexPositions;
+    for (Face f : mesh->faces()) {
+        Vector3 pi = p[f.halfedge().tailVertex()];
+        Vector3 pj = p[f.halfedge().tipVertex()];
+        Vector3 pk = p[f.halfedge().next().tipVertex()];
+        triangles.push_back(std::array<glm::vec3, 3>{
+            glm::vec3{pi.x, pi.y, pi.z}, glm::vec3{pj.x, pj.y, pj.z},
+            glm::vec3{pk.x, pk.y, pk.z}});
     }
     return triangles;
 }
@@ -265,8 +444,7 @@ void compute_virtual_vertex(const Eigen::MatrixXd& poly,
     weights = M.completeOrthogonalDecomposition().solve(b_).topRows(val);
 }
 
-std::vector<std::array<glm::vec3, 3>>
-astridInterpolate(const std::vector<glm::vec3>& pts) {
+glm::vec3 computeVirtualVertex(const std::vector<glm::vec3>& pts) {
     Eigen::MatrixXd pt_matrix(pts.size(), 3);
     for (size_t iP = 0; iP < pts.size(); iP++)
         pt_matrix.row(iP) << pts[iP].x, pts[iP].y, pts[iP].z;
@@ -274,114 +452,5 @@ astridInterpolate(const std::vector<glm::vec3>& pts) {
     compute_virtual_vertex(pt_matrix, weights);
 
     Eigen::VectorXd eigen_center = weights.transpose() * pt_matrix;
-    glm::vec3 center{eigen_center(0), eigen_center(1), eigen_center(2)};
-
-    std::vector<std::array<glm::vec3, 3>> triangles;
-    for (size_t iE = 0; iE < pts.size(); iE++) {
-        triangles.push_back(std::array<glm::vec3, 3>{
-            pts[iE], pts[(iE + 1) % pts.size()], center});
-    }
-    return triangles;
-}
-
-std::vector<std::array<glm::vec3, 3>>
-minimalSurface(const std::vector<glm::vec3>& pts) {
-    using namespace geometrycentral;
-    using namespace geometrycentral::surface;
-
-    uint subdivisions = 64;
-
-    std::vector<std::array<glm::vec3, 3>> init_positions =
-        triangulate_polygon(pts, subdivisions);
-
-    SimplePolygonMesh smp;
-    compute_vertex_face_lists(init_positions, smp.vertexCoordinates,
-                              smp.polygons);
-
-    std::unique_ptr<ManifoldSurfaceMesh> mesh;
-    std::unique_ptr<VertexPositionGeometry> geom;
-    std::tie(mesh, geom) =
-        makeManifoldSurfaceMeshAndGeometry(smp.polygons, smp.vertexCoordinates);
-
-    VertexData<bool> is_interior(*mesh, true);
-    for (BoundaryLoop b : mesh->boundaryLoops()) {
-        for (Vertex v : b.adjacentVertices()) is_interior[v] = false;
-    }
-
-    geom->requireCotanLaplacian();
-    geom->requireVertexIndices();
-
-    auto read_positions = [&](Vector<double>& x, Vector<double>& y,
-                              Vector<double>& z) {
-        const VertexData<size_t>& iV = geom->vertexIndices;
-        for (Vertex v : mesh->vertices()) {
-            x(iV[v]) = geom->vertexPositions[v].x;
-            y(iV[v]) = geom->vertexPositions[v].y;
-            z(iV[v]) = geom->vertexPositions[v].z;
-        }
-    };
-
-    auto set_positions = [&](const Vector<double>& x, const Vector<double>& y,
-                             const Vector<double>& z) {
-        const VertexData<size_t>& iV = geom->vertexIndices;
-        for (Vertex v : mesh->vertices()) {
-            geom->vertexPositions[v].x = x(iV[v]);
-            geom->vertexPositions[v].y = y(iV[v]);
-            geom->vertexPositions[v].z = z(iV[v]);
-        }
-    };
-
-    size_t N = mesh->nVertices();
-    Vector<double> x(N), y(N), z(N), x_int, x_bdy, y_int, y_bdy, z_int, z_bdy;
-
-    double change = 1;
-    size_t iter   = 0;
-    while (change > 1e-3 && iter < 25) {
-        SparseMatrix<double> L = geom->cotanLaplacian;
-        BlockDecompositionResult<double> decomp =
-            blockDecomposeSquare(L, is_interior.raw());
-
-        read_positions(x, y, z);
-        decomposeVector(decomp, x, x_int, x_bdy);
-        decomposeVector(decomp, y, y_int, y_bdy);
-        decomposeVector(decomp, z, z_int, z_bdy);
-
-        PositiveDefiniteSolver<double> solver(decomp.AA);
-        x_int = solver.solve(-decomp.AB * x_bdy);
-        y_int = solver.solve(-decomp.AB * y_bdy);
-        z_int = solver.solve(-decomp.AB * z_bdy);
-
-        Vector<double> new_x, new_y, new_z;
-        new_x = reassembleVector(decomp, x_int, x_bdy);
-        new_y = reassembleVector(decomp, y_int, y_bdy);
-        new_z = reassembleVector(decomp, z_int, z_bdy);
-
-        change = (new_x - x).squaredNorm() + (new_y - y).squaredNorm() +
-                 (new_z - z).squaredNorm();
-
-        set_positions(new_x, new_y, new_z);
-
-        x = new_x;
-        y = new_y;
-        z = new_z;
-        geom->refreshQuantities();
-
-        iter++;
-    }
-
-    geom->unrequireVertexIndices();
-    geom->unrequireCotanLaplacian();
-
-
-    std::vector<std::array<glm::vec3, 3>> triangles;
-    const VertexData<Vector3>& p = geom->vertexPositions;
-    for (Face f : mesh->faces()) {
-        Vector3 pi = p[f.halfedge().tailVertex()];
-        Vector3 pj = p[f.halfedge().tipVertex()];
-        Vector3 pk = p[f.halfedge().next().tipVertex()];
-        triangles.push_back(std::array<glm::vec3, 3>{
-            glm::vec3{pi.x, pi.y, pi.z}, glm::vec3{pj.x, pj.y, pj.z},
-            glm::vec3{pk.x, pk.y, pk.z}});
-    }
-    return triangles;
+    return glm::vec3{eigen_center(0), eigen_center(1), eigen_center(2)};
 }

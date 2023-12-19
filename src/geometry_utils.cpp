@@ -45,3 +45,35 @@ void compute_vertex_face_lists(
         faces.push_back(std::vector<size_t>{iA, iB, iC});
     }
 }
+
+std::vector<geometrycentral::Vector3>
+generate_point_faces(const std::vector<geometrycentral::Vector3>& points,
+                     const std::vector<geometrycentral::Vector3>& normals,
+                     double epsilon) {
+    using geometrycentral::Vector2;
+    using geometrycentral::Vector3;
+    Vector2 v1 = epsilon * Vector2{0, 1};
+    Vector2 v2 = epsilon * Vector2{-sin(2. * M_PI / 3), cos(2. * M_PI / 3)};
+    Vector2 v3 = epsilon * Vector2{-sin(4. * M_PI / 3), cos(4. * M_PI / 3)};
+
+    std::vector<Vector3> faceVerts;
+    for (size_t iP = 0; iP < points.size(); iP++) {
+        Vector3 x, y;
+        branchlessONB(normals[iP], x, y);
+        faceVerts.push_back(points[iP] + v1.x * x + v1.y * y);
+        faceVerts.push_back(points[iP] + v2.x * x + v2.y * y);
+        faceVerts.push_back(points[iP] + v3.x * x + v3.y * y);
+    }
+
+    return faceVerts;
+}
+
+void branchlessONB(const geometrycentral::Vector3& n,
+                   geometrycentral::Vector3& b1, geometrycentral::Vector3& b2) {
+    using geometrycentral::Vector3;
+    double sign    = copysign(1.0f, n.z);
+    const double a = -1.0f / (sign + n.z);
+    const double b = n.x * n.y * a;
+    b1 = Vector3{1.0f + sign * n.x * n.x * a, sign * b, -sign * n.x};
+    b2 = Vector3{b, sign + n.y * n.y * a, -n.y};
+}
