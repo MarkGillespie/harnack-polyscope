@@ -94,10 +94,10 @@ std::vector<std::string> camera_positions = {
     // done
 };
 
-float tmin = 0, tmax = 25, epsilon = .001;
-int max_iterations        = 2500;
-int resolution_x          = 120;
-int resolution_y          = 120;
+float tmin = 0, tmax = 25, epsilon = .075;
+int max_iterations        = 5000;
+int resolution_x          = 80;
+int resolution_y          = 80;
 bool use_grad_termination = false;
 bool use_overstepping     = false;
 bool use_extrapolation    = false;
@@ -174,11 +174,11 @@ Vector3 gradient(Vector3 p) {
 }
 
 
-// takes a plane with origx and normal n,
+// takes a plane with origin x and normal n,
 // and a sphere at point p with radius r,
 // and returns the minimum of <p - x, n> over all points p on the sphere
 double sphereDistToPlane(Vector3 x, Vector3 n, Vector3 p, double r) {
-    return dot(x - p, n) - r;
+    return dot(x - p, n) - r * n.norm();
 }
 
 // takes a point x and a sphere centered at point p with radius r,
@@ -222,8 +222,8 @@ double getMaxStep(double fx, double levelset, double R, double shift) {
     return R * abs(a + 2. - sqrt(a * a + 8. * a));
 }
 
-bool intersect(const Vector3& ro, const Vector3& rd, double& t, double& val,
-               bool careful = false) {
+bool intersect_harnack(const Vector3& ro, const Vector3& rd, double& t,
+                       double& val, bool careful = false) {
     int iter = 0;
     t        = 0.;
 
@@ -239,6 +239,10 @@ bool intersect(const Vector3& ro, const Vector3& rd, double& t, double& val,
         double R = closestPoint(pos, iClosest);
 
         if (closeToLevelset(val, levelset, epsilon, 1.)) {
+            return true;
+        } else if (R < epsilon / 10. && iClosest >= 0) {
+            // Vector3 n_closest = normals[iClosest];
+            // n                 = -normalize(n_closest);
             return true;
         }
 
@@ -310,7 +314,92 @@ bool intersect(const Vector3& ro, const Vector3& rd, double& t, double& val,
     return false;
 }
 
-enum class TracingMethod { Harnack, Raymarch };
+double clamp(double x, double x_min, double x_max) {
+    return fmin(fmax(x, x_min), x_max);
+}
+
+bool intersect_newton(const Vector3& ro, const Vector3& rd, double& t,
+                      double& val, bool careful = false) {
+    t = 0.;
+
+    Vector3 pos  = ro + t * rd;
+    Vector3 grad = gradient(pos);
+
+    for (size_t iter = 0; iter < 10 && grad.norm2() < 1e-6; iter++) {
+        t += .5;
+        Vector3 pos  = ro + t * rd;
+        Vector3 grad = gradient(pos);
+
+        if (careful) {
+            std::cout << "   grad: " << grad << std::endl;
+            auto pr = std::setprecision(4);
+            std::cout << std::setfill(' ') << std::setw(3) << iter
+                      << "| t = " << std::setw(8) << std::fixed << pr << t;
+            std::cout << " grad_f = " << grad << std::endl;
+        }
+    }
+
+
+    if (careful) {
+
+        std::ofstream o("dipole_potential_along_ray.csv");
+        if (!o) throw std::runtime_error("couldn't open output file ");
+        o << "t,val" << std::endl;
+        for (double s = 0; s < tmax; s += 0.05) {
+            Vector3 pos = ro + s * rd;
+            double val  = totalPotential(pos);
+            o << s << "," << val << std::endl;
+        }
+    }
+
+    double trust_radius       = 1.;
+    double accuracy_threshold = 0.25;
+
+    for (int iN = 0; iN < 16; iN++) {
+        pos = ro + t * rd;
+
+        val  = totalPotential(pos);
+        grad = gradient(pos);
+
+        double df    = dot(rd, grad);
+        double f_err = val - levelset;
+
+        double dt = -f_err / df;
+        dt        = clamp(dt, -trust_radius, trust_radius);
+
+        double accuracy =
+            (totalPotential(ro + (t + dt) * rd) - val) / (dt * df);
+
+        if (accuracy > .75 && abs(abs(dt) - trust_radius) < 0.01) {
+            trust_radius = fmin(2. * trust_radius, 4.);
+        } else if (accuracy < accuracy_threshold) {
+            trust_radius /= 4.;
+        }
+
+        if (careful) {
+            // std::cout << "   grad: " << grad << std::endl;
+            auto pr = std::setprecision(4);
+            std::cout << std::setfill(' ') << std::setw(3) << iN
+                      << "| t = " << std::setw(8) << std::fixed << pr << t
+                      << "  f = " << std::setw(8) << std::fixed << pr << val
+                      << " dt = " << std::setw(8) << std::fixed << pr << dt
+                      << " ferr = " << std::setw(8) << std::fixed << pr << f_err
+                      << " df = " << std::setw(8) << std::fixed << pr << df
+                      << " pos = " << pos << " grad_f = " << grad << std::endl;
+        }
+
+        if (abs(f_err) < epsilon) {
+            return true;
+        }
+
+        if (accuracy > accuracy_threshold) {
+            t += dt;
+        }
+    }
+    return false;
+}
+
+enum class TracingMethod { Harnack, Raymarch, Newton };
 std::map<std::string, acceleration_stats> test_results;
 polyscope::CameraParameters camParams;
 void shootCameraRays(std::string name     = "default",
@@ -333,7 +422,8 @@ void shootCameraRays(std::string name     = "default",
     double start       = std::clock();
     float aspect_ratio = (float)resolution_x / (float)resolution_y;
     tracing_mode = (method == TracingMethod::Harnack) ? "harnack" : "sphere";
-    int xBad = 52, yBad = 76;
+    // int xBad = 52, yBad = 76;
+    int xBad = 32, yBad = 52; // debug newton's method on icosahedron
     for (int iY = 0; iY < resolution_y; iY++) {
         for (int iX = 0; iX < resolution_x; iX++) {
             coordinates.push_back(
@@ -358,8 +448,21 @@ void shootCameraRays(std::string name     = "default",
             viewRayPts.push_back(ro + tmax * rd);
 
             double t, omega, iter_frac;
-            bool careful = false && iX == xBad && iY == yBad;
-            bool hit     = intersect(ro, rd, t, omega, careful);
+            bool careful = iX == xBad && iY == yBad;
+
+            bool hit;
+            switch (method) {
+            case TracingMethod::Harnack:
+                hit = intersect_harnack(ro, rd, t, omega, careful);
+                break;
+            case TracingMethod::Raymarch:
+                throw std::runtime_error("raymarching not implemented yet");
+                // hit = intersect_raymarch(ro, rd, t, omega, careful);
+                break;
+            case TracingMethod::Newton:
+                hit = intersect_newton(ro, rd, t, omega, careful);
+                break;
+            }
 
             if (hit) {
                 Vector3 intersection = ro + t * rd;
@@ -460,6 +563,11 @@ void display_dipole(size_t iP) {
 // Use ImGUI commands to build whatever you want here, see
 // https://github.com/ocornut/imgui/blob/master/imgui.h
 void myCallback() {
+    static std::vector<const char*> tracing_mode_names{
+        "Harnack Tracing", "Ray marching", "Newton's Method"};
+    static int tracing_mode = 2;
+    ImGui::Combo("Intersection Mode", &tracing_mode, tracing_mode_names.data(),
+                 tracing_mode_names.size());
     if (ImGui::Button("Shoot Camera Rays")) {
         std::string name =
             std::string(use_grad_termination ? "grad-terminated " : "") +
@@ -467,8 +575,21 @@ void myCallback() {
             std::string(use_extrapolation ? "extrapolated " : "") +
             std::string(use_newton ? "newton-accelerated " : "");
         if (name.length() == 0) name = "default ";
-        name += "Harnack tracing";
-        shootCameraRays(name);
+
+        switch (tracing_mode) {
+        case 0:
+            name += "Harnack tracing";
+            shootCameraRays(name, TracingMethod::Harnack);
+            break;
+        case 1:
+            name += "ray marching";
+            shootCameraRays(name, TracingMethod::Raymarch);
+            break;
+        case 2:
+            name += "Newton's method";
+            shootCameraRays(name, TracingMethod::Newton);
+            break;
+        }
     }
     if (ImGui::Button("Restore Camera View")) {
         polyscope::view::setViewToCamera(camParams);

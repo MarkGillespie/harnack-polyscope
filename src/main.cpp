@@ -202,6 +202,40 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
                                                      iter_frac, t, stats);
 }
 
+bool intersect_newton(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
+                      float* iter_frac = nullptr, float* omega = nullptr,
+                      acceleration_stats* stats = nullptr, int verbosity = 0) {
+    solid_angle_intersection_params sa_params;
+    sa_params.ray_P                = to_float3(ro);
+    sa_params.ray_D                = to_float3(rd);
+    sa_params.ray_tmin             = tmin;
+    sa_params.ray_tmax             = tmax;
+    sa_params.loops                = loops.data();
+    sa_params.pts                  = pts.data();
+    sa_params.n_loops              = 1;
+    sa_params.epsilon              = epsilon;
+    sa_params.levelset             = 2. * M_PI;
+    sa_params.frequency            = 0;
+    sa_params.solid_angle_formula  = 0;
+    sa_params.use_grad_termination = use_grad_termination;
+    sa_params.max_iterations       = max_iterations;
+    sa_params.clip_y               = false;
+    sa_params.capture_misses       = false;
+    sa_params.use_overstepping     = use_overstepping;
+    sa_params.use_extrapolation    = use_extrapolation;
+    sa_params.use_newton           = use_newton;
+    sa_params.epsilon_loose        = sqrt(epsilon);
+    sa_params.fixed_step_count     = fixed_step_count;
+
+    float ignore_t, ignore_iter, ignore_omega;
+    if (!t) t = &ignore_t;
+    if (!iter_frac) iter_frac = &ignore_iter;
+    if (!omega) omega = &ignore_omega;
+
+    return newton_intersect_T<double>(sa_params, omega, iter_frac, t, nullptr,
+                                      stats, verbosity);
+}
+
 bool intersect_sphere_tracing(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
                               float* iter_frac          = nullptr,
                               float* omega              = nullptr,
@@ -291,7 +325,7 @@ SimplePolygonMesh mesh_levelset(uint subdivisions = 64) {
 }
 
 //====== Experiment code
-enum class TracingMethod { Harnack, Sphere };
+enum class TracingMethod { Harnack, Sphere, Newton };
 std::map<std::string, acceleration_stats> test_results;
 polyscope::CameraParameters camParams;
 void shootCameraRays(std::string name     = "default",
@@ -340,10 +374,21 @@ void shootCameraRays(std::string name     = "default",
 
             float t, omega, iter_frac;
             acceleration_stats stats;
-            bool hit = method == TracingMethod::Harnack
-                           ? intersect(ro, rd, &t, &iter_frac, &omega, &stats)
-                           : intersect_sphere_tracing(ro, rd, &t, &iter_frac,
-                                                      &omega, &stats);
+            bool hit;
+            int verbosity = true && didHit.size() == 53;
+            switch (method) {
+            case TracingMethod::Harnack:
+                hit = intersect(ro, rd, &t, &iter_frac, &omega, &stats);
+                break;
+            case TracingMethod::Sphere:
+                hit = intersect_sphere_tracing(ro, rd, &t, &iter_frac, &omega,
+                                               &stats);
+                break;
+            case TracingMethod::Newton:
+                hit = intersect_newton(ro, rd, &t, &iter_frac, &omega, &stats,
+                                       verbosity);
+                break;
+            }
 
             if (hit) {
                 glm::vec3 intersection = ro + t * rd;
@@ -374,19 +419,19 @@ void shootCameraRays(std::string name     = "default",
             //               << "  R = " << std::setw(8) << stats.Rs[iI]
             //               << std::endl;
             // }
-            // for (size_t iI = 0; iI < stats.newton_ts.size(); iI++) {
-            //     std::cout << std::setfill(' ') << std::setw(3) << iI
-            //               << "| t = " << std::setw(8) <<
-            //               stats.newton_ts[iI]
-            //               << "  f = " << std::setw(8) <<
-            //               stats.newton_vals[iI]
-            //               << " 4π = " << std::setw(8) << 4. * M_PI
-            //               << " dt = " << std::setw(8) <<
-            //               stats.newton_dts[iI]
-            //               << " df = " << std::setw(8) <<
-            //               stats.newton_dfs[iI]
-            //               << std::endl;
-            // }
+            bool print_newton_stats = false && didHit.size() == 54;
+            if (print_newton_stats) {
+                for (size_t iI = 0; iI < stats.newton_ts.size(); iI++) {
+                    std::cout
+                        << std::setfill(' ') << std::setw(3) << iI
+                        << "| t = " << std::setw(8) << stats.newton_ts[iI]
+                        << "  f = " << std::setw(8) << stats.newton_vals[iI]
+                        << " 4π = " << std::setw(8) << 4. * M_PI
+                        << " dt = " << std::setw(8) << stats.newton_dts[iI]
+                        << " df = " << std::setw(8) << stats.newton_dfs[iI]
+                        << std::endl;
+                }
+            }
         }
     }
     double duration = (std::clock() - start) / (double)CLOCKS_PER_SEC;
@@ -702,6 +747,13 @@ polyscope::CurveNetwork* drawPolygon(const std::vector<float3>& pts,
 // Use ImGUI commands to build whatever you want here, see
 // https://github.com/ocornut/imgui/blob/master/imgui.h
 void myCallback() {
+
+    static std::vector<const char*> tracing_mode_names{
+        "Harnack Tracing", "Sphere Tracing", "Newton's Method"};
+    static int tracing_mode = 2;
+    ImGui::Combo("Intersection Mode", &tracing_mode, tracing_mode_names.data(),
+                 tracing_mode_names.size());
+
     if (ImGui::Button("Shoot Camera Rays")) {
         std::string name =
             std::string(use_grad_termination ? "grad-terminated " : "") +
@@ -709,8 +761,29 @@ void myCallback() {
             std::string(use_extrapolation ? "extrapolated " : "") +
             std::string(use_newton ? "newton-accelerated " : "");
         if (name.length() == 0) name = "default ";
-        name += "Harnack tracing";
-        shootCameraRays(name);
+
+        switch (tracing_mode) {
+        case 0:
+            name += "Harnack tracing";
+            shootCameraRays(name, TracingMethod::Harnack);
+            break;
+        case 1:
+            name += "sphere tracing";
+            if (sphere_tracing_mesh.vertexCoordinates.empty()) {
+                sphere_tracing_mesh = mesh_levelset(3);
+                polyscope::registerSurfaceMesh(
+                    "mesh", sphere_tracing_mesh.vertexCoordinates,
+                    sphere_tracing_mesh.polygons);
+                build_fcpw_scene();
+            }
+
+            shootCameraRays(name, TracingMethod::Sphere);
+            break;
+        case 2:
+            name += "Newton's method";
+            shootCameraRays(name, TracingMethod::Newton);
+            break;
+        }
     }
     if (ImGui::Button("Restore Camera View")) {
         polyscope::view::setViewToCamera(camParams);
@@ -773,16 +846,6 @@ void myCallback() {
                     "normals (" + sphere_tracing_mesh_normals[i].first + ")",
                     sphere_tracing_mesh_normals[i].second);
             }
-        }
-        if (ImGui::Button("Sphere Trace")) {
-            std::string name =
-                std::string(use_grad_termination ? "grad-terminated " : "") +
-                std::string(use_overstepping ? "overstepped " : "") +
-                std::string(use_extrapolation ? "extrapolated " : "") +
-                std::string(use_newton ? "newton-accelerated " : "");
-            if (name.length() == 0) name = "default ";
-            name += "sphere tracing";
-            shootCameraRays(name, TracingMethod::Sphere);
         }
         if (ImGui::Button("Save sphere tracing normals")) {
             std::array<std::vector<Vector3>, 3> point_faces;
