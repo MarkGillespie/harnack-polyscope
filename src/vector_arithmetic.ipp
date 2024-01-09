@@ -173,5 +173,14 @@ double fiberArg(const d4& q1, const d4& q2) {
 template <typename T>
 std::array<T, 3> from_float3(const float3& p) {
     return {(T)p.x, (T)p.y, (T)p.z};
-};
+}
+
+template <typename T>
+std::ostream& operator<<(std::ostream& o, const std::array<T, 3>& v) {
+    o << "(" << std::setw(8) << std::fixed << std::setprecision(4) << v[0]
+      << ", " << std::setw(8) << std::fixed << std::setprecision(4) << v[1]
+      << ", " << std::setw(8) << std::fixed << std::setprecision(4) << v[2]
+      << ")";
+    return o;
+}
 } // namespace
