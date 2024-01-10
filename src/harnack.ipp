@@ -1247,6 +1247,128 @@ newton_intersect_T(const solid_angle_intersection_params& params,
     return false;
 }
 
+template <typename T>
+ccl_device bool
+bisection_intersect_T(const solid_angle_intersection_params& params,
+                      ccl_private float* isect_u, ccl_private float* isect_v,
+                      ccl_private float* isect_t,
+                      ccl_private float* t_start = nullptr,
+                      acceleration_stats* stats = nullptr, int verbosity = 0) {
+
+    using T3 = std::array<T, 3>;
+
+    T epsilon   = static_cast<T>(params.epsilon);
+    T frequency = static_cast<T>(params.frequency);
+    T levelset  = static_cast<T>(params.levelset);
+    T shift     = 4. * M_PI;
+
+    T3 ray_P         = from_float3<T>(params.ray_P);
+    T3 ray_D         = from_float3<T>(params.ray_D);
+    uint globalStart = params.loops[0].x;
+
+    T ray_tmin = static_cast<T>(params.ray_tmin);
+    T ray_tmax = static_cast<T>(params.ray_tmax);
+
+    T lo_bound = 0;
+    T hi_bound = 4. * M_PI;
+
+    std::vector<uint> polygonLoops;
+    std::vector<T3> diskCenters, diskNormals;
+    std::vector<T> diskRadii;
+
+    classify_loops(params.pts, params.loops, params.n_loops, globalStart,
+                   &polygonLoops, &diskCenters, &diskNormals, &diskRadii);
+
+    // sums solid angle of polygon loops and disks and adds gradient to grad
+    auto total_solid_angle = [&](const T3& x, T3* grad) -> T {
+        if (grad) *grad = T3{0, 0, 0}; // zero out gradient before computing
+        int grad_mode = 0;
+        T omega       = polygon_solid_angle(
+            params.pts, params.loops, globalStart, polygonLoops, x,
+            params.solid_angle_formula, grad, grad_mode,
+            params.use_quick_triangulation);
+
+        for (uint iD = 0; iD < diskCenters.size(); iD++)
+            omega += disk_solid_angle(x, grad, diskCenters[iD], diskNormals[iD],
+                                      diskRadii[iD]);
+
+        return omega;
+    };
+
+    // mod and shift solid angle function so that we're looking for a zero of f
+    auto f = [&](T t) -> T {
+        T3 pos  = fma(ray_P, t, ray_D);
+        T omega = total_solid_angle(pos, nullptr);
+        return glsl_mod(omega, static_cast<T>(4. * M_PI)) - levelset;
+    };
+
+    T ta = t_start ? *t_start : 0; // TODO: random starting time?
+    T fa = f(ta);
+    T tb = .125;
+    T fb = f(tb);
+
+    size_t i_double = 0;
+    while (fa * fb > 0 && i_double < 10) {
+        tb *= 2;
+        fb = f(tb);
+        i_double++;
+    }
+
+    if (fa * fb > 0) return false;
+
+    if (verbosity >= 1)
+        std::cout << ">>> initial bounds: [ " << ta << ", " << tb << " ]"
+                  << std::endl;
+
+    int iter          = 0;
+    auto report_stats = [&]() {
+        if (stats) {
+            stats->total_iterations = iter;
+        }
+    };
+
+    for (; iter < 100; iter++) {
+        T tc = ta + (tb - ta) / 2.;
+        T fc = f(tc);
+
+        if (abs(fc) < params.epsilon || (true && (tb - ta < 1e-8))) {
+            T3 pos   = fma(ray_P, tc, ray_D);
+            T omega  = total_solid_angle(pos, nullptr);
+            T val    = glsl_mod(omega, static_cast<T>(4. * M_PI));
+            *isect_t = tc;
+            *isect_u = val / static_cast<T>(4. * M_PI);
+            *isect_v = ((T)iter) / ((T)params.max_iterations);
+            report_stats();
+            return true;
+        }
+
+        // if (tb - ta < params.epsilon * params.epsilon) break;
+
+        if (fa * fc < 0) { // intersection in first interfal
+            tb = tc;
+            fb = fc;
+        } else { // intersection in second interfal
+            ta = tc;
+            fa = fc;
+        }
+
+        if (verbosity >= 1) {
+            auto pr    = std::setprecision(4);
+            double fpi = 4. * M_PI;
+            double dt  = tb - ta;
+            std::cout << std::setfill(' ') << std::setw(3) << iter
+                      << "| ta = " << std::setw(8) << std::fixed << pr << ta
+                      << "  tb = " << std::setw(8) << std::fixed << pr << tb
+                      << "  δt = " << std::setw(8) << std::fixed << pr << dt
+                      << "  fa = " << std::setw(8) << std::fixed << pr << fa
+                      << "  fb = " << std::setw(8) << std::fixed << pr << fb
+                      << std::endl;
+        }
+    }
+
+    return false;
+}
+
 /* Normal on nonplanar polygon. */
 // TODO: move to better-named file
 // TODO: deduplicate with version in harnack tracing code?
