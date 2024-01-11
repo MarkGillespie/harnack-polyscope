@@ -11,6 +11,7 @@
 
 #include <fstream>
 
+#define HAS_POLYSCOPE
 #include "generalized_barycentric_coordinates.h"
 #include "geometry_utils.h"
 #include "harnack.h"
