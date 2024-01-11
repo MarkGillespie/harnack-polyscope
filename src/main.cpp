@@ -35,6 +35,10 @@ static std::vector<const char*> tracing_mode_names{
     "Harnack Tracing", "Sphere Tracing", "Newton's Method", "Bisection Search"};
 static int i_tracing_mode = 3;
 
+static std::vector<const char*> solid_angle_mode_names{
+    "Triangulated", "Prequantum", "Gauss-Bonnet"};
+static int i_solid_angle_mode = 0;
+
 float s = 0.5; // used in convergence tests
 std::vector<float3> pts{float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1},
                         float3{1, -s, -1},
@@ -202,7 +206,7 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     sa_params.epsilon                 = epsilon;
     sa_params.levelset                = 2. * M_PI;
     sa_params.frequency               = 0;
-    sa_params.solid_angle_formula     = 0;
+    sa_params.solid_angle_formula     = i_solid_angle_mode;
     sa_params.use_grad_termination    = use_grad_termination;
     sa_params.max_iterations          = max_iterations;
     sa_params.clip_y                  = false;
@@ -237,7 +241,7 @@ bool intersect_newton(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     sa_params.epsilon                 = epsilon;
     sa_params.levelset                = 2. * M_PI;
     sa_params.frequency               = 0;
-    sa_params.solid_angle_formula     = 0;
+    sa_params.solid_angle_formula     = i_solid_angle_mode;
     sa_params.use_grad_termination    = use_grad_termination;
     sa_params.max_iterations          = max_iterations;
     sa_params.clip_y                  = false;
@@ -273,7 +277,7 @@ bool intersect_bisection(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     sa_params.epsilon                 = epsilon;
     sa_params.levelset                = 2. * M_PI;
     sa_params.frequency               = 0;
-    sa_params.solid_angle_formula     = 0;
+    sa_params.solid_angle_formula     = i_solid_angle_mode;
     sa_params.use_grad_termination    = use_grad_termination;
     sa_params.max_iterations          = max_iterations;
     sa_params.clip_y                  = false;
@@ -947,16 +951,21 @@ void myCallback() {
             std::string polygon_name = named_polygons[selected_polygon].name;
 
             double min_y = 10000; // find min y coord to shift everything up to
-                                  // start at xz-plane
+                                  // start at CZ-plane
             std::vector<Vector3> gc_pts;
-            std::vector<size_t> face_vertex_list;
-            for (const float3& pt : pts) {
-                face_vertex_list.push_back(gc_pts.size());
-                gc_pts.push_back(to_gc(pt));
-                min_y = fmin(min_y, gc_pts.back().y);
+            std::vector<std::vector<size_t>> face_vertex_lists;
+            for (uint3 loop : loops) {
+                size_t s = loop.x;
+                size_t N = loop.y;
+                face_vertex_lists.push_back({});
+                for (size_t i = s; i < s + N; i++) {
+                    face_vertex_lists.back().push_back(gc_pts.size());
+                    gc_pts.push_back(to_gc(pts[i]));
+                    min_y = fmin(min_y, gc_pts.back().y);
+                }
             }
             for (Vector3& p : gc_pts) p.y -= min_y;
-            SimplePolygonMesh nonplanar_polygon({face_vertex_list}, gc_pts);
+            SimplePolygonMesh nonplanar_polygon(face_vertex_lists, gc_pts);
             nonplanar_polygon.writeMesh(polygon_name + "_polygon.obj", "obj");
 
 
@@ -980,6 +989,22 @@ void myCallback() {
                                          ".obj",
                                      "obj");
             }
+        }
+        if (ImGui::Button("Save sphere tracing mesh")) {
+            std::string polygon_name = named_polygons[selected_polygon].name;
+
+            double min_y = 10000; // find min y coord to shift everything up to
+                                  // start at xz-plane
+            std::vector<Vector3> shifted_pts;
+            for (Vector3 pt : sphere_tracing_mesh.vertexCoordinates) {
+                shifted_pts.push_back(pt);
+                min_y = fmin(min_y, pt.y);
+            }
+            for (Vector3& p : shifted_pts) p.y -= min_y;
+
+            SimplePolygonMesh shifted_mesh(sphere_tracing_mesh.polygons,
+                                           shifted_pts);
+            shifted_mesh.writeMesh(polygon_name + "_mesh.obj", "obj");
         }
         ImGui::TreePop();
     }
@@ -1022,6 +1047,9 @@ void myCallback() {
     }
 
     if (ImGui::TreeNode("Parameters")) {
+        ImGui::Combo("Solid Angle Mode", &i_solid_angle_mode,
+                     solid_angle_mode_names.data(),
+                     solid_angle_mode_names.size());
         ImGui::SliderFloat("epsilon (log)", &epsilon, .00000001f, .0001f,
                            "%.4f", ImGuiSliderFlags_Logarithmic);
         ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
