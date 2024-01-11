@@ -23,8 +23,8 @@ using namespace geometrycentral::surface;
 
 float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
-int resolution_x          = 25;
-int resolution_y          = 25;
+int resolution_x          = 1;
+int resolution_y          = 1;
 bool use_grad_termination = true;
 bool use_overstepping     = false;
 bool use_extrapolation    = false;
@@ -33,18 +33,18 @@ bool fixed_step_count     = false;
 
 static std::vector<const char*> tracing_mode_names{
     "Harnack Tracing", "Sphere Tracing", "Newton's Method", "Bisection Search"};
-static int i_tracing_mode = 3;
+static int i_tracing_mode = 0;
 
 static std::vector<const char*> solid_angle_mode_names{
     "Triangulated", "Prequantum", "Gauss-Bonnet"};
-static int i_solid_angle_mode = 0;
+static int i_solid_angle_mode = 2;
 
 float s = 0.5; // used in convergence tests
-std::vector<float3> pts{float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1},
-                        float3{1, -s, -1},
-                        // center
-                        float3{0, -1, 0}};
-std::vector<uint3> loops{uint3{0, 4, 0}};
+std::vector<packed_float3> pts{float3{1, s, 1}, float3{-1, -s, 1},
+                               float3{-1, s, -1}, float3{1, -s, -1},
+                               // center
+                               float3{0, -1, 0}};
+std::vector<packed_uint3> loops{uint3{0, 4, 0}};
 
 typedef struct named_polygon {
     std::string name;
@@ -191,6 +191,13 @@ std::vector<convergence_statistics> pixel_convergence_statistics;
 
 float3 to_float3(glm::vec3 v) { return make_float3(v.x, v.y, v.z); }
 glm::vec3 to_vec3(float3 v) { return glm::vec3{v.x, v.y, v.z}; }
+
+double evaluate_solid_angle(glm::vec3 x, size_t solid_angle_formula) {
+    uint globalStart = loops[0].x;
+    return polygon_solid_angle<double>(
+        pts.data(), loops.data(), globalStart, {0}, {x[0], x[1], x[2]},
+        solid_angle_formula, nullptr, 0, false, 1);
+}
 
 bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
                float* iter_frac = nullptr, float* omega = nullptr,
@@ -418,7 +425,8 @@ void shootCameraRays(std::string name     = "default",
     std::vector<glm::vec3> intersections, normals, viewRayPts;
     std::vector<std::array<size_t, 2>> viewRayLines;
     std::vector<float> omegas, iterationCounts, overstep_success_rate,
-        steps_after_epsilon_loose, newton_steps;
+        steps_after_epsilon_loose, newton_steps, values_triangulated,
+        values_prequantum, values_gauss_bonnet;
     std::vector<char> didHit;
     size_t successful_extrapolations = 0;
     float s                          = 0.05;
@@ -477,6 +485,13 @@ void shootCameraRays(std::string name     = "default",
 
                 omegas.push_back(omega);
                 normals.push_back(normal(intersections.back()));
+
+                values_triangulated.push_back(
+                    evaluate_solid_angle(intersection, 0));
+                values_prequantum.push_back(
+                    evaluate_solid_angle(intersection, 1));
+                values_gauss_bonnet.push_back(
+                    evaluate_solid_angle(intersection, 2));
             }
 
             iterationCounts.push_back(stats.total_iterations);
@@ -527,6 +542,9 @@ void shootCameraRays(std::string name     = "default",
     psCloud = polyscope::registerPointCloud("intersections", intersections);
     psCloud->addScalarQuantity("omega", omegas);
     psCloud->addVectorQuantity("normal", normals);
+    psCloud->addScalarQuantity("values (triangulated)", values_triangulated);
+    psCloud->addScalarQuantity("values (prequantum)", values_prequantum);
+    psCloud->addScalarQuantity("values (gauss-bonnet)", values_gauss_bonnet);
 
     auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
     viewPts->addScalarQuantity("did hit", didHit);
