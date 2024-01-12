@@ -275,7 +275,35 @@ T triangulated_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
             Lp[a] * Lp[b] * Lp[c] + dot(xp[a], xp[b]) * Lp[c] +
                 dot(xp[b], xp[c]) * Lp[a] + dot(xp[a], xp[c]) * Lp[b],
             dot(xp[c], n)};
+
+        if (!std::isfinite(tri_angle.real()) ||
+            !std::isfinite(tri_angle.imag())) {
+            std::cout << "Error: bad triangle solid angle: " << tri_angle
+                      << std::endl;
+            std::cout << "a: ( " << xp[a][0] << ", " << xp[a][1] << ", "
+                      << xp[a][2] << " ), length: " << Lp[a] << std::endl;
+            std::cout << "b: ( " << xp[b][0] << ", " << xp[b][1] << ", "
+                      << xp[b][2] << " ), length: " << Lp[b] << std::endl;
+            std::cout << "c: ( " << xp[c][0] << ", " << xp[c][1] << ", "
+                      << xp[c][2] << " ), length: " << Lp[c] << std::endl;
+
+            throw std::runtime_error("bad triangle solid angle");
+        }
+
+        std::complex<T> old_angle = running_angle;
         running_angle *= tri_angle;
+        if (!std::isfinite(running_angle.real()) ||
+            !std::isfinite(running_angle.imag())) {
+            std::cout << "Error: NaN running angle: " << std::endl;
+            std::cout << "old angle: " << old_angle << std::endl;
+            std::cout << "tri angle: " << tri_angle << std::endl;
+            std::cout << "product: " << running_angle << std::endl;
+
+            throw std::runtime_error("solid angle NaN");
+        }
+
+        // normalize complex number every so often
+        if (i % 5 == 0) running_angle /= std::abs(running_angle);
 
         //== compute gradient
         if (grad) {
@@ -301,7 +329,13 @@ T triangulated_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
         }
     }
 
-    return 2 * std::arg(running_angle);
+    T omega = 2 * std::arg(running_angle);
+    if (std::isnan(omega)) {
+        std::cout << "Error: NaN polygon solid angle as arg of "
+                  << running_angle << std::endl;
+        throw std::runtime_error("polygon solid angle NaN");
+    }
+    return omega;
 }
 
 // compute solid angle all loops in list polygonLoops evaluated at point x,
@@ -427,7 +461,7 @@ T loop_rotation_index(const std::vector<std::array<T, 3>>& xp,
     using T3 = std::array<T, 3>;
     using T2 = std::array<T, 2>;
 
-    size_t nS = 10;     // number of substeps to take along curve
+    size_t nS = 50;     // number of substeps to take along curve
     std::vector<T2> ps; // stereographic projections to plane
     ps.reserve(nS * xp.size());
     for (size_t iP = 0; iP < xp.size(); iP++) {

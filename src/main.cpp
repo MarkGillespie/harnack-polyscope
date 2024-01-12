@@ -31,6 +31,8 @@ bool use_overstepping     = false;
 bool use_extrapolation    = false;
 bool use_newton           = false;
 bool fixed_step_count     = false;
+bool intersect_with_mesh  = false;
+int loop_id               = 28;
 
 static std::vector<const char*> tracing_mode_names{
     "Harnack Tracing", "Sphere Tracing", "Newton's Method", "Bisection Search"};
@@ -38,7 +40,7 @@ static int i_tracing_mode = 0;
 
 static std::vector<const char*> solid_angle_mode_names{
     "Triangulated", "Prequantum", "Gauss-Bonnet"};
-static int i_solid_angle_mode = 2;
+static int i_solid_angle_mode = 0;
 
 float s = 0.5; // used in convergence tests
 std::vector<packed_float3> pts{float3{1, s, 1}, float3{-1, -s, 1},
@@ -124,6 +126,53 @@ void construct_approaching_circles() {
     }
 }
 
+void load_loop_file(std::string filepath) {
+    std::ifstream inStream(filepath);
+    if (!inStream) throw std::runtime_error("couldn't open file " + filepath);
+
+    //==== extract basename from filename https://stackoverflow.com/a/8520815
+    // If the path contains a slash, take the substring after it, otherwise use
+    // the whole path
+    size_t last_slash    = filepath.find_last_of('/');
+    std::string filename = (last_slash != std::string::npos)
+                               ? filepath.substr(last_slash + 1)
+                               : filepath;
+
+    // If the path contains a dot, take the substring before it, otherwise use
+    // the whole filename
+    size_t last_dot      = filename.find_last_of('.');
+    std::string basename = (last_dot != std::string::npos)
+                               ? filename.substr(0, last_dot)
+                               : filename;
+
+    std::vector<float3> file_pts;
+    std::vector<uint3> file_loops;
+    std::vector<std::vector<size_t>> face_vert_adj_list;
+
+    std::string line;
+    while (getline(inStream, line)) {
+        std::stringstream ss(line);
+        float x, y, z;
+
+        uint loop_start = file_pts.size(), loop_size = 0;
+        face_vert_adj_list.push_back({});
+
+        // Read three floats at a time from the line
+        while (ss >> x >> y >> z) {
+            face_vert_adj_list.back().push_back(file_pts.size());
+            file_pts.push_back(float3{x, y, z});
+            loop_size++;
+        }
+
+        // center
+        file_pts.push_back(float3{0, 0, 0});
+        file_loops.push_back(uint3{loop_start, loop_size, 0});
+    }
+
+    named_polygons.push_back(named_polygon{basename, file_pts, file_loops, 0});
+    polyscope::registerSurfaceMesh(basename, file_pts, face_vert_adj_list);
+}
+
 std::vector<std::string> camera_positions = {
     // default
     "{\"farClipRatio\":20.0,\"fov\":45.0,\"nearClipRatio\":0.005,"
@@ -202,13 +251,13 @@ double evaluate_solid_angle(glm::vec3 x, size_t solid_angle_formula) {
 
 bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
                float* iter_frac = nullptr, float* omega = nullptr,
-               acceleration_stats* stats = nullptr) {
+               acceleration_stats* stats = nullptr, size_t i_loop = 0) {
     solid_angle_intersection_params sa_params;
     sa_params.ray_P                   = to_float3(ro);
     sa_params.ray_D                   = to_float3(rd);
     sa_params.ray_tmin                = tmin;
     sa_params.ray_tmax                = tmax;
-    sa_params.loops                   = loops.data();
+    sa_params.loops                   = &loops[i_loop];
     sa_params.pts                     = pts.data();
     sa_params.n_loops                 = 1;
     sa_params.epsilon                 = epsilon;
@@ -233,6 +282,38 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
 
     return ray_nonplanar_polygon_intersect_T<double>(sa_params, omega,
                                                      iter_frac, t, stats);
+}
+
+bool intersect_mesh(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
+                    float* iter_frac = nullptr, float* omega = nullptr,
+                    acceleration_stats* stats = nullptr) {
+
+    float t_min         = tmax;
+    float iter_frac_min = 0;
+    float omega_min     = 0;
+    acceleration_stats stats_min;
+    bool did_hit = false;
+
+    for (size_t i_loop = 0; i_loop < loops.size(); i_loop++) {
+        float t_i, iter_frac_i, omega_i;
+        acceleration_stats stats_i;
+        bool hit_i =
+            intersect(ro, rd, &t_i, &iter_frac_i, &omega_i, &stats_i, i_loop);
+        did_hit = did_hit || hit_i;
+        if (t_i < t_min) {
+            t_min         = t_i;
+            omega_min     = omega_i;
+            iter_frac_min = iter_frac_i;
+            stats_min     = stats_i;
+        }
+    }
+
+    if (t) *t = t_min;
+    if (iter_frac) *iter_frac = iter_frac_min;
+    if (omega) *omega = omega_min;
+    if (stats) *stats = stats_min;
+
+    return did_hit;
 }
 
 bool intersect_newton(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
@@ -464,7 +545,11 @@ void shootCameraRays(std::string name     = "default",
             int verbosity = didHit.size() == 317;
             switch (method) {
             case TracingMethod::Harnack:
-                hit = intersect(ro, rd, &t, &iter_frac, &omega, &stats);
+                hit =
+                    intersect_with_mesh
+                        ? intersect_mesh(ro, rd, &t, &iter_frac, &omega, &stats)
+                        : intersect(ro, rd, &t, &iter_frac, &omega, &stats,
+                                    loop_id);
                 break;
             case TracingMethod::Sphere:
                 hit = intersect_sphere_tracing(ro, rd, &t, &iter_frac, &omega,
@@ -487,13 +572,18 @@ void shootCameraRays(std::string name     = "default",
                 omegas.push_back(omega);
                 normals.push_back(normal(intersections.back()));
 
-                values_triangulated.push_back(
-                    evaluate_solid_angle(intersection, 0));
-                values_prequantum.push_back(
-                    evaluate_solid_angle(intersection, 1));
-                values_gauss_bonnet.push_back(
-                    evaluate_solid_angle(intersection, 2));
+                if (false) {
+                    values_triangulated.push_back(
+                        evaluate_solid_angle(intersection, 0));
+                    values_prequantum.push_back(
+                        evaluate_solid_angle(intersection, 1));
+                    values_gauss_bonnet.push_back(
+                        evaluate_solid_angle(intersection, 2));
+                }
             }
+
+            std::cout << "   final t value: " << stats.times.back() << vendl;
+            std::cout << "   final ω value: " << stats.vals.back() << vendl;
 
             iterationCounts.push_back(stats.total_iterations);
             overstep_success_rate.push_back((double)stats.successful_oversteps /
@@ -543,9 +633,13 @@ void shootCameraRays(std::string name     = "default",
     psCloud = polyscope::registerPointCloud("intersections", intersections);
     psCloud->addScalarQuantity("omega", omegas);
     psCloud->addVectorQuantity("normal", normals);
-    psCloud->addScalarQuantity("values (triangulated)", values_triangulated);
-    psCloud->addScalarQuantity("values (prequantum)", values_prequantum);
-    psCloud->addScalarQuantity("values (gauss-bonnet)", values_gauss_bonnet);
+    if (false) {
+        psCloud->addScalarQuantity("values (triangulated)",
+                                   values_triangulated);
+        psCloud->addScalarQuantity("values (prequantum)", values_prequantum);
+        psCloud->addScalarQuantity("values (gauss-bonnet)",
+                                   values_gauss_bonnet);
+    }
 
     auto viewPts = polyscope::registerPointCloud("view ray points", viewRayPts);
     viewPts->addScalarQuantity("did hit", didHit);
@@ -1069,8 +1163,8 @@ void myCallback() {
         ImGui::Combo("Solid Angle Mode", &i_solid_angle_mode,
                      solid_angle_mode_names.data(),
                      solid_angle_mode_names.size());
-        ImGui::SliderFloat("epsilon (log)", &epsilon, .00000001f, .0001f,
-                           "%.4f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("epsilon (log)", &epsilon, .00000001f, .1f, "%.4f",
+                           ImGuiSliderFlags_Logarithmic);
         ImGui::DragFloat("tmin", &tmin, .1f, 0.f, 20.f);
         ImGui::DragFloat("tmax", &tmax, .1f, 0.f, 20.f);
         ImGui::DragInt("max_iterations", &max_iterations, 10, 1, 50000);
@@ -1081,6 +1175,8 @@ void myCallback() {
         ImGui::Checkbox("use_extrapolation", &use_extrapolation);
         ImGui::Checkbox("use_newton", &use_newton);
         ImGui::Checkbox("fixed_step_count", &fixed_step_count);
+        ImGui::Checkbox("intersect_with_mesh", &intersect_with_mesh);
+        ImGui::DragInt("loop_id", &loop_id, 1, 0, loops.size());
         ImGui::TreePop();
     }
     static std::vector<const char*> polygon_names;
@@ -1217,10 +1313,14 @@ void myCallback() {
 }
 
 int main(int argc, char** argv) {
+    polyscope::init(); // Initialize polyscope
+    polyscope::options::programName = "Harnack Debugger";
 
     // Configure the argument parser
     args::ArgumentParser parser("Harnack debugger");
-    polyscope::options::programName = "Harnack Debugger";
+
+    args::Positional<std::string> inputFilename(parser, "loop_file",
+                                                ".loops file to load.");
 
     // Parse args
     try {
@@ -1235,9 +1335,11 @@ int main(int argc, char** argv) {
     }
 
     construct_approaching_circles();
-
-    // Initialize polyscope
-    polyscope::init();
+    if (inputFilename) {
+        load_loop_file(args::get(inputFilename));
+        pts   = named_polygons.back().pts;
+        loops = named_polygons.back().loops;
+    }
 
     // Set the callback function
     polyscope::state::userCallback = myCallback;
