@@ -15,8 +15,16 @@ void normalize(f3& vec) {
     float s = len(vec);
     for (uint i = 0; i < 3; i++) vec[i] /= s;
 }
+f3 normalized(const f3& vec) {
+    float s = len(vec);
+    return {vec[0] / s, vec[1] / s, vec[2] / s};
+}
 f3 diff(const f3& a, const f3& b) {
     return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+}
+f3 operator-(const f3& a, const f3& b) { return diff(a, b); }
+f3 operator+(const f3& a, const f3& b) {
+    return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
 }
 f3 diff_f(const float3& a, const f3& b) {
     return {(float)a.x - b[0], (float)a.y - b[1], (float)a.z - b[2]};
@@ -96,11 +104,19 @@ d3 cross(const d3& a, const d3& b) {
 double len_squared(const d3& a) { return dot(a, a); }
 double len(const d3& a) { return sqrt(len_squared(a)); }
 void normalize(d3& vec) {
-    float s = len(vec);
+    double s = len(vec);
     for (uint i = 0; i < 3; i++) vec[i] /= s;
+}
+d3 normalized(const d3& vec) {
+    double s = len(vec);
+    return {vec[0] / s, vec[1] / s, vec[2] / s};
 }
 d3 diff(const d3& a, const d3& b) {
     return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+}
+d3 operator-(const d3& a, const d3& b) { return diff(a, b); }
+d3 operator+(const d3& a, const d3& b) {
+    return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
 }
 d3 diff_f(const float3& a, const d3& b) {
     return {(double)a.x - b[0], (double)a.y - b[1], (double)a.z - b[2]};
@@ -176,11 +192,255 @@ std::array<T, 3> from_float3(const float3& p) {
 }
 
 template <typename T>
+float3 to_float3(const std::array<T, 3>& p) {
+    return make_float3(p[0], p[1], p[2]);
+}
+
+template <typename T>
 std::ostream& operator<<(std::ostream& o, const std::array<T, 3>& v) {
     o << "(" << std::setw(8) << std::fixed << std::setprecision(4) << v[0]
       << ", " << std::setw(8) << std::fixed << std::setprecision(4) << v[1]
       << ", " << std::setw(8) << std::fixed << std::setprecision(4) << v[2]
       << ")";
     return o;
+}
+
+// interval arithmetic stolen from https://www.shadertoy.com/view/7tKfz1 by fad
+template <typename T>
+struct interval {
+    T l, u;
+};
+
+template <typename T>
+interval<T> iMinMax(T x, T y, T z, T w) {
+    return {std::min(x, std::min(y, std::min(z, w))),
+            std::max(x, std::max(y, std::max(z, w)))};
+}
+
+template <typename T>
+interval<T> iNeg(interval<T> x) { // -x
+    return {-x.u, -x.l};
+}
+
+template <typename T>
+interval<T> iInv(interval<T> x) { // 1 / x
+    if (x.l > 0.0 || x.u < 0.0) {
+        return {1.0 / x.u, 1.0 / x.l};
+    } else if (x.l < 0.0 && x.u > 0.0) {
+        return {-std::numeric_limits<T>::infinity(),
+                std::numeric_limits<T>::infinity()};
+    } else if (x.u == 0.0) {
+        return {-std::numeric_limits<T>::infinity(), 1.0 / x.l};
+    } else {
+        return {1.0 / x.u, std::numeric_limits<T>::infinity()};
+    }
+}
+
+template <typename T>
+interval<T> iAdd(interval<T> x, interval<T> y) {
+    return {x.l + y.l, x.u + y.u};
+}
+template <typename T>
+interval<T> iSub(interval<T> x, interval<T> y) {
+    return {x.l - y.u, x.u - y.l};
+}
+template <typename T>
+interval<T> iMul(interval<T> x, interval<T> y) {
+    return iMinMax(x.l * y.l, x.l * y.u, x.u * y.l, x.u * y.u);
+}
+template <typename T>
+interval<T> iDiv(interval<T> x, interval<T> y) {
+    return iMul(x, iInv(y));
+}
+
+template <typename T>
+interval<T> iFloor(interval<T> x) {
+    return {floor(x.l), floor(x.u)};
+}
+
+template <typename T>
+interval<T> iMod(interval<T> x, interval<T> y) {
+    return iSub(x, iMul(y, iFloor(iDiv(x, y))));
+}
+
+template <typename T>
+interval<T> iSqrt(interval<T> x) {
+    if (x.l > 0.0) return {sqrt(x.l), sqrt(x.u)};
+    if (x.u > 0.0) return {0.0, sqrt(x.u)};
+    if (x.u == 0.0) return {0, 0};
+    return {sqrt(x.l), sqrt(x.u)}; // NaNs?
+    // return EMPTY_SET;
+}
+
+
+template <typename T>
+interval<T> iAtan(interval<T> x) {
+    return {atan(x.l), atan(x.u)};
+}
+
+template <typename T>
+interval<T> iAtan2(interval<T> y, interval<T> x) {
+    if (x.u < 0.) {
+        if (y.u < 0.) return {atan2(y.u, x.l), atan2(y.l, x.u)};
+        if (y.l < 0.) return {-M_PI, M_PI};
+        return {atan2(y.u, x.u), atan2(y.l, x.l)};
+    }
+
+    if (x.u == 0.) {
+        if (x.l < 0.) {
+            if (y.u < 0.) return {atan2(y.u, x.l), -M_PI / 2.};
+            if (y.l < 0.) return {-M_PI, M_PI};
+            if (y.l == 0.) return {0., M_PI};
+            return {M_PI / 2., atan2(y.l, x.l)};
+        }
+
+        if (y.u < 0.) return {-M_PI / 2., -M_PI / 2.};
+
+        if (y.u == 0.) {
+            if (y.l < 0.) return {-M_PI / 2., 0.};
+            return {0., 0.};
+        }
+
+        if (y.l < 0.) return {-M_PI / 2., M_PI / 2.};
+        if (y.l == 0.) return {0., M_PI / 2.};
+        return {M_PI / 2., M_PI / 2.};
+    }
+
+    if (x.l < 0.) {
+        if (y.u < 0.) return {atan2(y.u, x.l), atan2(y.u, x.u)};
+        if (y.u == 0.) {
+            if (y.l == 0.) return {0., M_PI};
+            return {-M_PI, M_PI};
+        }
+        if (y.l < 0.) return {-M_PI, M_PI};
+        if (y.l == 0.) return {0., M_PI};
+        return {atan2(y.l, x.u), atan2(y.l, x.l)};
+    }
+
+    if (x.l == 0.) {
+        if (y.u <= 0.) return {atan2(y.u, x.u), -M_PI / 2.};
+        if (y.l < 0.) return {-M_PI / 2., M_PI / 2.};
+        if (y.l == 0.) return {0., M_PI / 2.};
+        return {atan2(y.l, x.u), M_PI / 2.};
+    }
+
+    return iAtan(iDiv(y, x));
+}
+
+template <typename T>
+interval<T> operator+(const interval<T>& a, const interval<T>& b) {
+    return iAdd(a, b);
+}
+
+template <typename T>
+interval<T> operator-(const interval<T>& a, const interval<T>& b) {
+    return iSub(a, b);
+}
+
+template <typename T>
+interval<T> operator*(const interval<T>& a, const interval<T>& b) {
+    return iMul(a, b);
+}
+template <typename T>
+interval<T> operator/(const interval<T>& a, const interval<T>& b) {
+    return iDiv(a, b);
+}
+
+#define MAKE_OVERLOADS(fn)                                                     \
+    template <typename T>                                                      \
+    interval<T> fn(T x, const interval<T>& y) {                                \
+        return fn(interval<T>{x, x}, y);                                       \
+    }                                                                          \
+    template <typename T>                                                      \
+    interval<T> fn(const interval<T>& x, T y) {                                \
+        return fn(x, interval<T>{y, y});                                       \
+    }
+
+// 4.56199
+MAKE_OVERLOADS(iAdd)
+MAKE_OVERLOADS(iSub)
+MAKE_OVERLOADS(iMul)
+MAKE_OVERLOADS(iDiv)
+MAKE_OVERLOADS(iFloor)
+MAKE_OVERLOADS(iMod)
+MAKE_OVERLOADS(operator+)
+MAKE_OVERLOADS(operator-)
+MAKE_OVERLOADS(operator*)
+MAKE_OVERLOADS(operator/)
+
+template <typename T>
+struct i_vec3 {
+    interval<T> x, y, z;
+};
+
+template <typename T>
+i_vec3<T> iAdd(const i_vec3<T>& a, const i_vec3<T>& b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+template <typename T>
+i_vec3<T> iSub(const i_vec3<T>& a, const i_vec3<T>& b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+template <typename T>
+i_vec3<T> iMul(const i_vec3<T>& a, const interval<T>& b) {
+    return {a.x * b, a.y * b, a.z * b};
+}
+template <typename T>
+i_vec3<T> iDiv(const i_vec3<T>& a, const interval<T>& b) {
+    return {a.x / b, a.y / b, a.z / b};
+}
+template <typename T>
+interval<T> iDot(const i_vec3<T>& a, const i_vec3<T>& b) {
+    return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
+}
+template <typename T>
+i_vec3<T> iCross(const i_vec3<T>& a, const i_vec3<T>& b) {
+    return {a.y * b.z - a.z * b.y, //
+            a.z * b.x - a.x * b.z, //
+            a.x * b.y - a.y * b.x};
+}
+template <typename T>
+interval<T> iLen(const i_vec3<T>& a) {
+    return iSqrt(iDot(a, a));
+}
+
+template <typename T>
+i_vec3<T> operator+(const i_vec3<T>& a, const i_vec3<T>& b) {
+    return iAdd(a, b);
+}
+
+template <typename T>
+i_vec3<T> operator-(const i_vec3<T>& a, const i_vec3<T>& b) {
+    return iSub(a, b);
+}
+
+template <typename T>
+i_vec3<T> operator*(const i_vec3<T>& a, const interval<T>& b) {
+    return iMul(a, b);
+}
+template <typename T>
+i_vec3<T> operator*(const interval<T>& a, const i_vec3<T>& b) {
+    return iMul(b, a);
+}
+template <typename T>
+i_vec3<T> operator/(const i_vec3<T>& a, const interval<T>& b) {
+    return iDiv(a, b);
+}
+
+template <typename T>
+struct i_cplx {
+    interval<T> re, im;
+    i_cplx& operator*=(const i_cplx& other) {
+        interval<T> a = re;
+        interval<T> b = im;
+        re            = (a * other.re) - (b * other.im);
+        im            = (a * other.im) + (b * other.re);
+        return *this;
+    }
+};
+
+template <typename T>
+interval<T> iArg(const i_cplx<T>& z) {
+    return iAtan2(z.im, z.re);
 }
 } // namespace

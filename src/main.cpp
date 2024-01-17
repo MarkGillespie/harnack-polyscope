@@ -32,10 +32,13 @@ bool use_extrapolation    = false;
 bool use_newton           = false;
 bool fixed_step_count     = false;
 bool intersect_with_mesh  = false;
-int loop_id               = 28;
+bool polygon_with_holes   = false;
+int loop_id               = 0;
+float target_levelset     = .5;
 
 static std::vector<const char*> tracing_mode_names{
-    "Harnack Tracing", "Sphere Tracing", "Newton's Method", "Bisection Search"};
+    "Harnack Tracing", "Sphere Tracing", "Newton's Method", "Bisection Search",
+    "Interval Arithmetic"};
 static int i_tracing_mode = 0;
 
 static std::vector<const char*> solid_angle_mode_names{
@@ -127,9 +130,6 @@ void construct_approaching_circles() {
 }
 
 void load_loop_file(std::string filepath) {
-    std::ifstream inStream(filepath);
-    if (!inStream) throw std::runtime_error("couldn't open file " + filepath);
-
     //==== extract basename from filename https://stackoverflow.com/a/8520815
     // If the path contains a slash, take the substring after it, otherwise use
     // the whole path
@@ -144,29 +144,52 @@ void load_loop_file(std::string filepath) {
     std::string basename = (last_dot != std::string::npos)
                                ? filename.substr(0, last_dot)
                                : filename;
+    std::string filetype = (last_dot != std::string::npos)
+                               ? filename.substr(last_dot + 1)
+                               : "loops";
 
     std::vector<float3> file_pts;
     std::vector<uint3> file_loops;
     std::vector<std::vector<size_t>> face_vert_adj_list;
+    if (filetype == "loops") {
+        std::ifstream inStream(filepath);
+        if (!inStream)
+            throw std::runtime_error("couldn't open file " + filepath);
 
-    std::string line;
-    while (getline(inStream, line)) {
-        std::stringstream ss(line);
-        float x, y, z;
+        std::string line;
+        while (getline(inStream, line)) {
+            std::stringstream ss(line);
+            float x, y, z;
 
-        uint loop_start = file_pts.size(), loop_size = 0;
-        face_vert_adj_list.push_back({});
+            uint loop_start = file_pts.size(), loop_size = 0;
+            face_vert_adj_list.push_back({});
 
-        // Read three floats at a time from the line
-        while (ss >> x >> y >> z) {
-            face_vert_adj_list.back().push_back(file_pts.size());
-            file_pts.push_back(float3{x, y, z});
-            loop_size++;
+            // Read three floats at a time from the line
+            while (ss >> x >> y >> z) {
+                face_vert_adj_list.back().push_back(file_pts.size());
+                file_pts.push_back(float3{x, y, z});
+                loop_size++;
+            }
+
+            // center
+            file_pts.push_back(float3{0, 0, 0});
+            file_loops.push_back(uint3{loop_start, loop_size, 0});
         }
-
-        // center
-        file_pts.push_back(float3{0, 0, 0});
-        file_loops.push_back(uint3{loop_start, loop_size, 0});
+    } else {
+        SimplePolygonMesh mesh;
+        mesh.readMeshFromFile(filepath);
+        for (const std::vector<size_t>& face : mesh.polygons) {
+            uint loop_start = file_pts.size(), loop_size = 0;
+            face_vert_adj_list.push_back({});
+            for (size_t iV : face) {
+                face_vert_adj_list.back().push_back(file_pts.size());
+                file_pts.push_back(to_float3(mesh.vertexCoordinates[iV]));
+                loop_size++;
+            }
+            // center
+            file_pts.push_back(float3{0, 0, 0});
+            file_loops.push_back(uint3{loop_start, loop_size, 0});
+        }
     }
 
     named_polygons.push_back(named_polygon{basename, file_pts, file_loops, 0});
@@ -259,9 +282,9 @@ bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     sa_params.ray_tmax                = tmax;
     sa_params.loops                   = &loops[i_loop];
     sa_params.pts                     = pts.data();
-    sa_params.n_loops                 = 1;
+    sa_params.n_loops                 = polygon_with_holes ? loops.size() : 1;
     sa_params.epsilon                 = epsilon;
-    sa_params.levelset                = 2. * M_PI;
+    sa_params.levelset                = target_levelset * 4. * M_PI;
     sa_params.frequency               = 0;
     sa_params.solid_angle_formula     = i_solid_angle_mode;
     sa_params.use_grad_termination    = use_grad_termination;
@@ -326,9 +349,9 @@ bool intersect_newton(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     sa_params.ray_tmax                = tmax;
     sa_params.loops                   = loops.data();
     sa_params.pts                     = pts.data();
-    sa_params.n_loops                 = 1;
+    sa_params.n_loops                 = polygon_with_holes ? loops.size() : 1;
     sa_params.epsilon                 = epsilon;
-    sa_params.levelset                = 2. * M_PI;
+    sa_params.levelset                = target_levelset * 4. * M_PI;
     sa_params.frequency               = 0;
     sa_params.solid_angle_formula     = i_solid_angle_mode;
     sa_params.use_grad_termination    = use_grad_termination;
@@ -362,9 +385,9 @@ bool intersect_bisection(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     sa_params.ray_tmax                = tmax;
     sa_params.loops                   = loops.data();
     sa_params.pts                     = pts.data();
-    sa_params.n_loops                 = 1;
+    sa_params.n_loops                 = polygon_with_holes ? loops.size() : 1;
     sa_params.epsilon                 = epsilon;
-    sa_params.levelset                = 2. * M_PI;
+    sa_params.levelset                = target_levelset * 4. * M_PI;
     sa_params.frequency               = 0;
     sa_params.solid_angle_formula     = i_solid_angle_mode;
     sa_params.use_grad_termination    = use_grad_termination;
@@ -386,6 +409,46 @@ bool intersect_bisection(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
     return bisection_intersect_T<double>(sa_params, omega, iter_frac, t,
                                          nullptr, stats, verbosity);
 }
+
+bool intersect_interval(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
+                        float* iter_frac = nullptr, float* omega = nullptr,
+                        acceleration_stats* stats = nullptr,
+                        int verbosity             = 0) {
+    solid_angle_intersection_params sa_params;
+    sa_params.ray_P                   = to_float3(ro);
+    sa_params.ray_D                   = to_float3(rd);
+    sa_params.ray_tmin                = tmin;
+    sa_params.ray_tmax                = tmax;
+    sa_params.loops                   = loops.data();
+    sa_params.pts                     = pts.data();
+    sa_params.n_loops                 = polygon_with_holes ? loops.size() : 1;
+    sa_params.epsilon                 = epsilon;
+    sa_params.levelset                = target_levelset * 4. * M_PI;
+    sa_params.frequency               = 0;
+    sa_params.solid_angle_formula     = i_solid_angle_mode;
+    sa_params.use_grad_termination    = use_grad_termination;
+    sa_params.max_iterations          = max_iterations;
+    sa_params.clip_y                  = false;
+    sa_params.capture_misses          = false;
+    sa_params.use_overstepping        = use_overstepping;
+    sa_params.use_extrapolation       = use_extrapolation;
+    sa_params.use_newton              = use_newton;
+    sa_params.use_quick_triangulation = false;
+    sa_params.epsilon_loose           = sqrt(epsilon);
+    sa_params.fixed_step_count        = fixed_step_count;
+
+    float ignore_t, ignore_iter, ignore_omega;
+    if (!t) t = &ignore_t;
+    if (!iter_frac) iter_frac = &ignore_iter;
+    if (!omega) omega = &ignore_omega;
+
+    float t_star;
+    bool should_hit = intersect(ro, rd, &t_star);
+
+    return interval_intersect_T<double>(sa_params, omega, iter_frac, t,
+                                        &t_star);
+}
+
 
 bool intersect_sphere_tracing(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
                               float* iter_frac          = nullptr,
@@ -491,7 +554,7 @@ SimplePolygonMesh mesh_levelset(uint subdivisions = 64,
 }
 
 //====== Experiment code
-enum class TracingMethod { Harnack, Sphere, Newton, Bisection };
+enum class TracingMethod { Harnack, Sphere, Newton, Bisection, Interval };
 std::map<std::string, acceleration_stats> test_results;
 polyscope::CameraParameters camParams;
 void shootCameraRays(std::string name     = "default",
@@ -506,7 +569,7 @@ void shootCameraRays(std::string name     = "default",
 
     std::vector<glm::vec3> intersections, normals, viewRayPts;
     std::vector<std::array<size_t, 2>> viewRayLines;
-    std::vector<float> omegas, iterationCounts, overstep_success_rate,
+    std::vector<float> ts, omegas, iterationCounts, overstep_success_rate,
         steps_after_epsilon_loose, newton_steps, values_triangulated,
         values_prequantum, values_gauss_bonnet;
     std::vector<char> didHit;
@@ -563,12 +626,17 @@ void shootCameraRays(std::string name     = "default",
                 hit = intersect_bisection(ro, rd, &t, &iter_frac, &omega,
                                           &stats, verbosity);
                 break;
+            case TracingMethod::Interval:
+                hit = intersect_interval(ro, rd, &t, &iter_frac, &omega, &stats,
+                                         verbosity);
+                break;
             }
 
             if (hit) {
                 glm::vec3 intersection = ro + t * rd;
                 intersections.push_back(intersection);
 
+                ts.push_back(t);
                 omegas.push_back(omega);
                 normals.push_back(normal(intersections.back()));
 
@@ -582,8 +650,17 @@ void shootCameraRays(std::string name     = "default",
                 }
             }
 
-            std::cout << "   final t value: " << stats.times.back() << vendl;
-            std::cout << "   final ω value: " << stats.vals.back() << vendl;
+            bool debug_query = false;
+            if (debug_query) {
+                std::cout << "   final t value: " << stats.times.back()
+                          << vendl;
+                std::cout << "   final ω value: " << stats.vals.back() << vendl;
+                std::vector<Vector2> t_w_pairs;
+                for (size_t i = 0; i < stats.times.size(); i++) {
+                    t_w_pairs.push_back({stats.times[i], stats.vals[i]});
+                }
+                polyscope::registerCurveNetworkLine2D("t-ω plot", t_w_pairs);
+            }
 
             iterationCounts.push_back(stats.total_iterations);
             overstep_success_rate.push_back((double)stats.successful_oversteps /
@@ -631,6 +708,7 @@ void shootCameraRays(std::string name     = "default",
     double meanTime = duration / viewRayPts.size();
 
     psCloud = polyscope::registerPointCloud("intersections", intersections);
+    psCloud->addScalarQuantity("t", ts);
     psCloud->addScalarQuantity("omega", omegas);
     psCloud->addVectorQuantity("normal", normals);
     if (false) {
@@ -675,9 +753,12 @@ void shootCameraRays(std::string name     = "default",
 }
 
 void write_convergence_statistics(
-    std::string filename = tracing_mode + "_convergence_statistics.csv") {
+    std::string filename = tracing_mode + "_convergence_statistics_full.csv") {
     std::ofstream out;
     out.open(filename);
+
+    // Use full precision
+    out.precision(std::numeric_limits<double>::max_digits10);
 
     //=== column headers
     out << "grad_termination,";
@@ -996,6 +1077,10 @@ void myCallback() {
                                                vert_face_adj);
             }
             break;
+        case 4:
+            name += "interval arithmetic";
+            shootCameraRays(name, TracingMethod::Interval);
+            break;
         }
     }
     if (ImGui::Button("Restore Camera View")) {
@@ -1117,6 +1202,8 @@ void myCallback() {
 
             SimplePolygonMesh shifted_mesh(sphere_tracing_mesh.polygons,
                                            shifted_pts);
+            std::cout << "Writing sphere tracing mesh to " << polygon_name
+                      << "_mesh.obj" << vendl;
             shifted_mesh.writeMesh(polygon_name + "_mesh.obj", "obj");
         }
         ImGui::TreePop();
@@ -1176,7 +1263,9 @@ void myCallback() {
         ImGui::Checkbox("use_newton", &use_newton);
         ImGui::Checkbox("fixed_step_count", &fixed_step_count);
         ImGui::Checkbox("intersect_with_mesh", &intersect_with_mesh);
+        ImGui::Checkbox("polygon_with_holes", &polygon_with_holes);
         ImGui::DragInt("loop_id", &loop_id, 1, 0, loops.size());
+        ImGui::DragFloat("target_levelset", &target_levelset, .1f, 0.f, 1.f);
         ImGui::TreePop();
     }
     static std::vector<const char*> polygon_names;

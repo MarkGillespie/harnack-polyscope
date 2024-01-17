@@ -4,6 +4,28 @@
 //    MOD_HARNACK_PREQUANTUM = 1,
 //    MOD_HARNACK_GAUSS_BONNET = 2,
 
+// find the two times at which a ray intersects a sphere
+template <typename T>
+bool intersect_sphere(const std::array<T, 3>& ro, const std::array<T, 3>& rd,
+                      T radius, T* t0, T* t1) {
+    // solve | ro + t rd  |^2 == radius^2
+    T a     = dot(rd, rd);
+    T b     = static_cast<T>(2) * dot(rd, ro);
+    T c     = dot(ro, ro) - radius * radius;
+    T discr = b * b - static_cast<T>(4) * a * c;
+    if (discr < 0) {
+        return false;
+    } else {
+        T sqrt_d = std::sqrt(discr);
+        T q      = (b > 0) ? static_cast<T>(-0.5) * (b + sqrt_d)
+                           : static_cast<T>(-0.5) * (b - sqrt_d);
+        *t0      = q / a;
+        *t1      = c / q;
+        if (*t1 < *t0) std::swap(*t0, *t1);
+        return true;
+    }
+}
+
 typedef struct spherical_harmonic_intersection_params {
     float3 ray_P;
     float3 ray_D;
@@ -43,27 +65,6 @@ ccl_device bool ray_spherical_harmonic_intersect_T(
     // since the spherical harmonic is homogeneous of degree l, we can bound it
     // using a bound on the unit sphere and our sphere radius
     T shift = unitBound * static_cast<T>(std::pow(outerRadius, params.l));
-
-    // find the two times at which a ray intersects a sphere
-    auto intersectSphere = [](const T3& ro, const T3& rd, T radius, T* t0,
-                              T* t1) -> bool {
-        // solve | ro + t rd  |^2 == radius^2
-        T a     = dot(rd, rd);
-        T b     = static_cast<T>(2) * dot(rd, ro);
-        T c     = dot(ro, ro) - radius * radius;
-        T discr = b * b - static_cast<T>(4) * a * c;
-        if (discr < 0) {
-            return false;
-        } else {
-            T sqrt_d = std::sqrt(discr);
-            T q      = (b > 0) ? static_cast<T>(-0.5) * (b + sqrt_d)
-                               : static_cast<T>(-0.5) * (b - sqrt_d);
-            *t0      = q / a;
-            *t1      = c / q;
-            if (t1 < t0) std::swap(*t0, *t1);
-            return true;
-        }
-    };
 
     auto distance_to_boundary = [&](const T3& x) -> T {
         return outerRadius - len(x);
@@ -134,11 +135,11 @@ ccl_device bool ray_spherical_harmonic_intersect_T(
     // check if ray intersects sphere. If so, store two intersection times (t0 <
     // t1)
     T t0, t1;
-    bool hitSphere = intersectSphere(ray_P, ray_D, radius, &t0, &t1);
+    bool hit_sphere = intersect_sphere(ray_P, ray_D, radius, &t0, &t1);
 
     // if we miss the sphere, there cannot be an intersection with the levelset
     // within the sphere
-    if (!hitSphere) return false;
+    if (!hit_sphere) return false;
 
     T t = fmax(
         t0,
@@ -239,8 +240,10 @@ bool close_to_zero(T ang, T lo_bound, T hi_bound, T tol,
 // compute solid angle of loop starting at pts[iStart] with length N,
 // evaluated at point x, and adds the gradient to *grad, computed as follows:
 // grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
+
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T triangulated_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
@@ -275,74 +278,48 @@ T triangulated_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
             Lp[a] * Lp[b] * Lp[c] + dot(xp[a], xp[b]) * Lp[c] +
                 dot(xp[b], xp[c]) * Lp[a] + dot(xp[a], xp[c]) * Lp[b],
             dot(xp[c], n)};
-
-        if (!std::isfinite(tri_angle.real()) ||
-            !std::isfinite(tri_angle.imag())) {
-            std::cout << "Error: bad triangle solid angle: " << tri_angle
-                      << std::endl;
-            std::cout << "a: ( " << xp[a][0] << ", " << xp[a][1] << ", "
-                      << xp[a][2] << " ), length: " << Lp[a] << std::endl;
-            std::cout << "b: ( " << xp[b][0] << ", " << xp[b][1] << ", "
-                      << xp[b][2] << " ), length: " << Lp[b] << std::endl;
-            std::cout << "c: ( " << xp[c][0] << ", " << xp[c][1] << ", "
-                      << xp[c][2] << " ), length: " << Lp[c] << std::endl;
-
-            throw std::runtime_error("bad triangle solid angle");
-        }
-
-        std::complex<T> old_angle = running_angle;
         running_angle *= tri_angle;
-        if (!std::isfinite(running_angle.real()) ||
-            !std::isfinite(running_angle.imag())) {
-            std::cout << "Error: NaN running angle: " << std::endl;
-            std::cout << "old angle: " << old_angle << std::endl;
-            std::cout << "tri angle: " << tri_angle << std::endl;
-            std::cout << "product: " << running_angle << std::endl;
-
-            throw std::runtime_error("solid angle NaN");
-        }
 
         // normalize complex number every so often
         if (i % 5 == 0) running_angle /= std::abs(running_angle);
 
         //== compute gradient
         if (grad) {
+            const T3& g0 = xp[a];
+            const T3& g1 = xp[b];
             if (grad_mode == 0) {
-                const T3& g0 = xp[a];
-                const T3& g1 = xp[b];
-                T n2         = len_squared(n);
-                T scale      = ((-dot(g0, g1) + dot(g0, g0)) / len(g0) +
+                T n2    = len_squared(n);
+                T scale = ((-dot(g0, g1) + dot(g0, g0)) / len(g0) +
                            (-dot(g0, g1) + dot(g1, g1)) / len(g1));
                 (*grad)[0] += n[0] / n2 * scale;
                 (*grad)[1] += n[1] / n2 * scale;
                 (*grad)[2] += n[2] / n2 * scale;
-            } else {
-                const T3& v = xp[a];
-                const T3& w = xp[b];
-                T lv        = len(v);
-                T lw        = len(w);
-                T scale     = (lv + lw) / (lv * lw + dot(v, w));
+            } else if (grad_mode == 1) {
+                T lv    = len(g0);
+                T lw    = len(g1);
+                T scale = (lv + lw) / (lv * lw * (lv * lw + dot(g0, g1)));
                 (*grad)[0] += n[0] * scale;
                 (*grad)[1] += n[1] * scale;
                 (*grad)[2] += n[2] * scale;
+            } else if (grad_mode == 2) {
+                T n2    = len_squared(n);
+                T scale = dot(g0 - g1, normalized(g0) - normalized(g1));
+                (*grad)[0] += n[0] / n2 * scale;
+                (*grad)[1] += n[1] / n2 * scale;
+                (*grad)[2] += n[2] / n2 * scale;
             }
         }
     }
 
-    T omega = 2 * std::arg(running_angle);
-    if (std::isnan(omega)) {
-        std::cout << "Error: NaN polygon solid angle as arg of "
-                  << running_angle << std::endl;
-        throw std::runtime_error("polygon solid angle NaN");
-    }
-    return omega;
+    return 2 * std::arg(running_angle);
 }
 
 // compute solid angle all loops in list polygonLoops evaluated at point x,
 // and adds the gradient to *grad, computed as follows:
 // grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T triangulated_solid_angle(const packed_float3* pts, const packed_uint3* loops,
@@ -365,9 +342,11 @@ T triangulated_solid_angle(const packed_float3* pts, const packed_uint3* loops,
 
 // compute solid angle of loop starting at pts[iStart] with length N,
 // evaluated at point x, using the prequantum formula and adds the gradient to
-// *grad, computed as follows: grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+// *grad, computed as follows:
+// grad_mode: 0 - nicole formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T prequantum_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
@@ -399,26 +378,29 @@ T prequantum_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
 
         //== compute gradient
         if (grad) {
+            const T3& g0 = xp[a];
+            const T3& g1 = xp[b];
+            const T3& n  = cross(g0, g1);
             if (grad_mode == 0) {
-                const T3& g0 = xp[a];
-                const T3& g1 = xp[b];
-                T3 n         = cross(g0, g1);
-                T n2         = len_squared(n);
-                T scale      = ((-dot(g0, g1) + dot(g0, g0)) / len(g0) +
+                T n2    = len_squared(n);
+                T scale = ((-dot(g0, g1) + dot(g0, g0)) / len(g0) +
                            (-dot(g0, g1) + dot(g1, g1)) / len(g1));
                 (*grad)[0] += n[0] / n2 * scale;
                 (*grad)[1] += n[1] / n2 * scale;
                 (*grad)[2] += n[2] / n2 * scale;
-            } else {
-                const T3& v = xp[a];
-                const T3& w = xp[b];
-                T3 n        = cross(v, w);
-                T lv        = len(v);
-                T lw        = len(w);
-                T scale     = (lv + lw) / (lv * lw + dot(v, w));
+            } else if (grad_mode == 1) {
+                T lv    = len(g0);
+                T lw    = len(g1);
+                T scale = (lv + lw) / (lv * lw * (lv * lw + dot(g0, g1)));
                 (*grad)[0] += n[0] * scale;
                 (*grad)[1] += n[1] * scale;
                 (*grad)[2] += n[2] * scale;
+            } else if (grad_mode == 2) {
+                T n2    = len_squared(n);
+                T scale = dot(g0 - g1, normalized(g0) - normalized(g1));
+                (*grad)[0] += n[0] / n2 * scale;
+                (*grad)[1] += n[1] / n2 * scale;
+                (*grad)[2] += n[2] / n2 * scale;
             }
         }
     }
@@ -429,8 +411,9 @@ T prequantum_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
 // compute solid angle via prequantum formula for all loops in list polygonLoops
 // evaluated at point x, and adds the gradient to *grad, computed as follows:
 // grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T prequantum_solid_angle(const packed_float3* pts, const packed_uint3* loops,
@@ -461,7 +444,7 @@ T loop_rotation_index(const std::vector<std::array<T, 3>>& xp,
     using T3 = std::array<T, 3>;
     using T2 = std::array<T, 2>;
 
-    size_t nS = 50;     // number of substeps to take along curve
+    size_t nS = 10;     // number of substeps to take along curve
     std::vector<T2> ps; // stereographic projections to plane
     ps.reserve(nS * xp.size());
     for (size_t iP = 0; iP < xp.size(); iP++) {
@@ -531,9 +514,11 @@ T loop_rotation_index(const std::vector<std::array<T, 3>>& xp,
 
 // compute solid angle of loop starting at pts[iStart] with length N,
 // evaluated at point x, using the gauss-bonnet formula and adds the gradient to
-// *grad, computed as follows: grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+// *grad, computed as follows:
+// grad_mode: 0 - nicole formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T gauss_bonnet_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
@@ -574,26 +559,29 @@ T gauss_bonnet_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
 
         //== compute gradient
         if (grad) {
+            const T3& g0 = xp[a];
+            const T3& g1 = xp[b];
+            const T3& n  = n_prev;
             if (grad_mode == 0) {
-                const T3& g0 = xp[a];
-                const T3& g1 = xp[b];
-                const T3& n  = n_prev;
-                T n2         = len_squared(n);
-                T scale      = ((-dot(g0, g1) + dot(g0, g0)) / len(g0) +
+                T n2    = len_squared(n);
+                T scale = ((-dot(g0, g1) + dot(g0, g0)) / len(g0) +
                            (-dot(g0, g1) + dot(g1, g1)) / len(g1));
                 (*grad)[0] += n[0] / n2 * scale;
                 (*grad)[1] += n[1] / n2 * scale;
                 (*grad)[2] += n[2] / n2 * scale;
-            } else {
-                const T3& v = xp[a];
-                const T3& w = xp[b];
-                const T3& n = n_prev;
-                T lv        = len(v);
-                T lw        = len(w);
-                T scale     = (lv + lw) / (lv * lw + dot(v, w));
+            } else if (grad_mode == 1) {
+                T lv    = len(g0);
+                T lw    = len(g1);
+                T scale = (lv + lw) / (lv * lw * (lv * lw + dot(g0, g1)));
                 (*grad)[0] += n[0] * scale;
                 (*grad)[1] += n[1] * scale;
                 (*grad)[2] += n[2] * scale;
+            } else if (grad_mode == 2) {
+                T n2    = len_squared(n);
+                T scale = dot(g0 - g1, normalized(g0) - normalized(g1));
+                (*grad)[0] += n[0] / n2 * scale;
+                (*grad)[1] += n[1] / n2 * scale;
+                (*grad)[2] += n[2] / n2 * scale;
             }
         }
     }
@@ -607,8 +595,9 @@ T gauss_bonnet_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
 // compute solid angle via gauss-bonnet for all loops in list polygonLoops
 // evaluated at point x, and adds the gradient to *grad, computed as follows:
 // grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T gauss_bonnet_solid_angle(const packed_float3* pts, const packed_uint3* loops,
@@ -635,8 +624,9 @@ T gauss_bonnet_solid_angle(const packed_float3* pts, const packed_uint3* loops,
 //                   2 - gauss-bonnet
 // and adds the gradient to *grad, computed as follows:
 // grad_mode: 0 - nicole formula
-//            1 - none
-//            2 - architecture formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - none
 // (if grad == nullptr, gradient is not computed anyway)
 template <typename T>
 T polygon_solid_angle(const packed_float3* pts, const packed_uint3* loops,
@@ -958,7 +948,7 @@ ccl_device bool ray_nonplanar_polygon_intersect_T(
 
     // sums solid angle of polygon loops and disks and adds gradient to grad
     auto total_solid_angle = [&](const T3& x, T3& grad) -> T {
-        int grad_mode = params.use_grad_termination ? 0 : 1;
+        int grad_mode = params.use_grad_termination ? 0 : 3;
         grad          = T3{0, 0, 0}; // zero out gradient before computing
         T omega       = polygon_solid_angle(
             params.pts, params.loops, globalStart, polygonLoops, x,
@@ -1456,7 +1446,7 @@ bisection_intersect_T(const solid_angle_intersection_params& params,
         T tc = ta + (tb - ta) / 2.;
         T fc = f(tc);
 
-        if (abs(fc) < params.epsilon || (true && (tb - ta < 1e-8))) {
+        if (std::abs(fc) < params.epsilon || (false && (tb - ta < 1e-8))) {
             T3 pos   = fma(ray_P, tc, ray_D);
             T omega  = total_solid_angle(pos, nullptr);
             T val    = glsl_mod(omega, static_cast<T>(4. * M_PI));
@@ -1495,12 +1485,12 @@ bisection_intersect_T(const solid_angle_intersection_params& params,
 }
 
 /* Normal on nonplanar polygon. */
-// TODO: move to better-named file
-// TODO: deduplicate with version in harnack tracing code?
+// TODO: move to better-named file?
 
-// int grad_mode; // 0 = nicole formula,
-//                   1 = finite diff,
-//                   2 = architecture formula
+// grad_mode: 0 - nicole formula
+//            1 - Adiels formula 10
+//            2 - Adiels formula 8
+//            3 - finite differences
 
 template <typename T>
 ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
@@ -1546,9 +1536,11 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
     T3 grad{0, 0, 0};
     switch (grad_mode) {
     case 0: // nicole formula
+    case 1: // Adiels eq 10
+    case 2: // Adiels eq 8
         compute_solid_angle(p, &grad);
         break;
-    case 1: // finite differences
+    case 3: // finite differences
     {
         T h       = 0.000001;
         T omega   = compute_solid_angle(p, nullptr);
@@ -1561,11 +1553,6 @@ ccl_device float3 ray_nonplanar_polygon_normal_T(const float3 pf,
         T fd_df_dz = (omega_z - omega) / h;
 
         grad = T3{fd_df_dx, fd_df_dy, fd_df_dz};
-        break;
-    }
-    case 2: // architecture
-    {
-        compute_solid_angle(p, &grad);
         break;
     }
     }
@@ -1616,4 +1603,577 @@ ccl_device float3 ray_spherical_harmonic_normal_T(const float3 pf, uint m,
     normalize(grad);
 
     return make_float3(grad[0], grad[1], grad[2]);
+}
+
+typedef struct gyroid_intersection_params {
+    float3 ray_P;
+    float3 ray_D;
+    float ray_tmin;
+    float ray_tmax;
+
+    float R;
+    float frequency;
+    float epsilon;
+    float levelset;
+    int max_iterations;
+    bool use_overstepping;
+    bool use_grad_termination;
+} gyroid_intersection_params;
+
+// Return the value of the gyroid at an evaluation point s*p,
+template <typename T>
+T evaluateGyroid(const std::array<T, 3>& p, T s) {
+    T x = s * p[0];
+    T y = s * p[1];
+    T z = s * p[2];
+    return sin(x) * cos(y) + sin(y) * cos(z) + sin(z) * cos(x);
+}
+
+// Return the gradient of gyroid(s*p) with respect to p, evaluated at evaluation
+// point s*p,
+template <typename T>
+std::array<T, 3> evaluateGyroidGradient(const std::array<T, 3>& p, T s) {
+    T x = s * p[0];
+    T y = s * p[1];
+    T z = s * p[2];
+    return {s * cos(x) * cos(y) - s * sin(z) * sin(x),
+            s * cos(y) * cos(z) - s * sin(x) * sin(y),
+            s * cos(z) * cos(x) - s * sin(y) * sin(z)};
+}
+
+template <typename T>
+ccl_device bool ray_gyroid_intersect_T(const gyroid_intersection_params& params,
+                                       ccl_private float* isect_u,
+                                       ccl_private float* isect_v,
+                                       ccl_private float* isect_t,
+                                       acceleration_stats* stats = nullptr) {
+    using T3   = std::array<T, 3>;
+    T epsilon  = static_cast<T>(params.epsilon);
+    T scale    = 1. / static_cast<T>(params.frequency);
+    T levelset = static_cast<T>(params.levelset);
+
+    T3 ray_P = from_float3<T>(params.ray_P);
+    T3 ray_D = from_float3<T>(params.ray_D);
+
+    T ray_tmin = static_cast<T>(params.ray_tmin);
+    T ray_tmax = static_cast<T>(params.ray_tmax);
+
+    T radius       = static_cast<T>(params.R);
+    T outer_radius = static_cast<T>(1.25) * radius; // TODO: make configurable?
+
+    T unit_shift = 3.;
+
+    auto distance_to_boundary = [&](const T3& x) -> T {
+        return outer_radius - len(x);
+    };
+
+    // find safe step size derived from 4D Harnack inequality
+    auto getMaxStep4D = [](T fx, T R, T levelset, T shift) -> T {
+        T a = (fx + shift) / (levelset + shift);
+        T u = std::pow(3. * sqrt(3. * std::pow(a, 3.) + 81. * std::pow(a, 2.)) +
+                           27. * a,
+                       1. / 3.);
+        return R * std::abs(u / 3. - a / u - 1.);
+    };
+
+    auto distanceToLevelset = [&](T f, T levelset, const T3& grad) -> T {
+        T scaling = params.use_grad_termination ? fmax(len(grad), epsilon) : 1;
+        return std::abs(f - levelset) / scaling;
+    };
+
+    // check if ray intersects sphere. If so, store intersection times (t0 < t1)
+    T t0, t1;
+    bool hit_sphere = intersect_sphere(ray_P, ray_D, radius, &t0, &t1);
+
+    // if we miss the sphere, there cannot be an intersection with the levelset
+    // within the sphere
+    if (!hit_sphere) return false;
+
+    // start at first sphere intersection if it is ahead of us
+    T t    = fmax(t0, ray_tmin);
+    T tMax = fmin(ray_tmax, t1); // only trace until second sphere intersection
+    T ld   = len(ray_D);
+
+    int iter     = 0;
+    T t_overstep = 0.;
+
+    static bool exceeded_max = false;
+
+    // Until we reach the maximum ray distance
+    while (t < tMax) {
+        // If we've exceeded the maximum number of iterations, print a warning
+        if (iter >= params.max_iterations) {
+            if (!exceeded_max) {
+                exceeded_max = true;
+                printf("Warning: exceeded maximum number of Harnack "
+                       "iterations.\n");
+            }
+        }
+
+        T3 pos = fma(ray_P, t + t_overstep, ray_D);
+        T f    = evaluateGyroid(pos, scale);
+        T3 grad;
+        if (params.use_grad_termination)
+            grad = evaluateGyroidGradient(pos, scale);
+
+        T R = distance_to_boundary(pos);
+        T shift =
+            std::exp(sqrt(2.) * R) * unit_shift; // scale shift for 4D sphere
+
+        T r = getMaxStep4D(f, R, levelset, shift) / ld; // safe step size
+
+        if (r >= t_overstep) { // commit to step
+
+            T dist = distanceToLevelset(f, levelset, grad);
+            // If we're close enough to the level set, return a hit.
+            if (dist < epsilon) {
+                *isect_t = t + t_overstep;
+                *isect_u = f;
+                *isect_v = ((T)iter) / ((T)params.max_iterations);
+                return true;
+            }
+
+            t += t_overstep + r;
+            if (params.use_overstepping) t_overstep = r * .75;
+        } else { // step back and try again
+            t_overstep = 0;
+        }
+
+        iter++;
+    }
+
+    return false; // no intersection
+}
+
+template <typename T>
+ccl_device float3 ray_gyroid_normal_T(const float3 pf, float R,
+                                      float frequency) {
+    using T3 = std::array<T, 3>;
+
+    T3 p     = from_float3<T>(pf);
+    T radius = static_cast<T>(R);
+    T scale  = 1. / static_cast<T>(frequency);
+
+    // special case for points on boundary
+    if (std::abs(len_squared(p) - radius * radius) < (float)1e-5) {
+        normalize(p);
+        return to_float3(p);
+    } else {
+        T3 grad = evaluateGyroidGradient(p, scale);
+        normalize(grad);
+        return to_float3(grad);
+    }
+}
+
+template <typename T>
+ccl_device bool newton_intersect_gyroid_T(
+    const gyroid_intersection_params& params, ccl_private float* isect_u,
+    ccl_private float* isect_v, ccl_private float* isect_t,
+    ccl_private float* t_start = nullptr, acceleration_stats* stats = nullptr,
+    int verbosity = 0) {
+
+    // TODO: clip to sphere
+    using T3   = std::array<T, 3>;
+    T epsilon  = static_cast<T>(params.epsilon);
+    T scale    = 1. / static_cast<T>(params.frequency);
+    T levelset = static_cast<T>(params.levelset);
+
+    T3 ray_P = from_float3<T>(params.ray_P);
+    T3 ray_D = from_float3<T>(params.ray_D);
+
+    T ray_tmin = static_cast<T>(params.ray_tmin);
+    T ray_tmax = static_cast<T>(params.ray_tmax);
+    T radius   = static_cast<T>(params.R);
+
+    // check if ray intersects sphere. If so, store intersection times (t0 < t1)
+    T t0, t1;
+    bool hit_sphere = intersect_sphere(ray_P, ray_D, radius, &t0, &t1);
+
+    // if we miss the sphere, there cannot be an intersection with the levelset
+    // within the sphere
+    if (!hit_sphere) return false;
+
+    // start at first sphere intersection if it is ahead of us
+    T tInit = fmax(t0, ray_tmin);
+    T tMax  = fmin(ray_tmax, t1); // only trace until second sphere intersection
+
+    auto distanceToLevelset = [&](T f, T levelset, const T3& grad) -> T {
+        T scaling = params.use_grad_termination ? fmax(len(grad), epsilon) : 1;
+        return std::abs(f - levelset) / scaling;
+    };
+
+    T3 grad_f;
+    auto f = [&](T t, T3* grad_f) -> T {
+        T3 pos = fma(ray_P, t, ray_D);
+        T val  = evaluateGyroid(pos, scale);
+        if (grad_f) *grad_f = evaluateGyroidGradient(pos, scale);
+        return val;
+    };
+
+    int iter = 0;
+    T t      = t_start ? *t_start : tInit; // TODO: random starting time?
+    T val    = f(t, &grad_f);
+
+    if (verbosity >= 1)
+        std::cout << ">>> initial grad: " << grad_f << std::flush << std::endl;
+
+    for (int iN = 0; iN < 8; iN++) {
+        T df    = dot(ray_D, grad_f);
+        T f_err = val - levelset;
+        T dt    = -f_err / df;
+        dt      = fmin(fmax(dt, -2.), 2.); // clamp to [-2, 2]
+
+        if (verbosity >= 1) {
+            auto pr    = std::setprecision(4);
+            double fpi = 4. * M_PI;
+            std::cout << std::setfill(' ') << std::setw(3) << iN
+                      << "| t = " << std::setw(8) << std::fixed << pr << t
+                      << "  f = " << std::setw(8) << std::fixed << pr << val
+                      << " 4π = " << std::setw(8) << std::fixed << pr << fpi
+                      << " dt = " << std::setw(8) << std::fixed << pr << dt
+                      << " ferr = " << std::setw(8) << std::fixed << pr << f_err
+                      << " df = " << std::setw(8) << std::fixed << pr << df
+                      << " pos = " << fma(ray_P, t, ray_D)
+                      << " grad_f = " << grad_f << std::endl;
+        }
+
+        t += dt;
+        val = f(t, &grad_f);
+
+        if (distanceToLevelset(val, levelset, grad_f) < epsilon) {
+            if (t < tInit || t > tMax) return false; // root is out of bounds
+            *isect_t = t;
+            *isect_u = val;
+            *isect_v = ((T)iter) / ((T)params.max_iterations);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+template <typename T>
+ccl_device bool bisection_intersect_gyroid_T(
+    const gyroid_intersection_params& params, ccl_private float* isect_u,
+    ccl_private float* isect_v, ccl_private float* isect_t,
+    ccl_private float* t_start = nullptr, acceleration_stats* stats = nullptr,
+    int verbosity = 0) {
+    // TODO: clip to sphere
+    using T3   = std::array<T, 3>;
+    T epsilon  = static_cast<T>(params.epsilon);
+    T scale    = 1. / static_cast<T>(params.frequency);
+    T levelset = static_cast<T>(params.levelset);
+
+    T3 ray_P = from_float3<T>(params.ray_P);
+    T3 ray_D = from_float3<T>(params.ray_D);
+
+    T ray_tmin = static_cast<T>(params.ray_tmin);
+    T ray_tmax = static_cast<T>(params.ray_tmax);
+    T radius   = static_cast<T>(params.R);
+
+    auto distanceToLevelset = [&](T f, T levelset, const T3& grad) -> T {
+        T scaling = params.use_grad_termination ? fmax(len(grad), epsilon) : 1;
+        return std::abs(f - levelset) / scaling;
+    };
+
+    // check if ray intersects sphere. If so, store intersection times (t0 < t1)
+    T t0, t1;
+    bool hit_sphere = intersect_sphere(ray_P, ray_D, radius, &t0, &t1);
+
+    // if we miss the sphere, there cannot be an intersection with the levelset
+    // within the sphere
+    if (!hit_sphere) return false;
+
+    // start at first sphere intersection if it is ahead of us
+    T t    = fmax(t0, ray_tmin);
+    T tMax = fmin(ray_tmax, t1); // only trace until second sphere intersection
+
+    // shift function so that we're looking for a zero of f
+    auto f = [&](T t) -> T {
+        T3 pos = fma(ray_P, t, ray_D);
+        T val  = evaluateGyroid(pos, scale);
+        return val - levelset;
+    };
+
+    T ta = t;
+    T fa = f(ta);
+    T sb = .125;
+    T tb = ta + sb;
+    T fb = f(tb);
+
+    size_t i_double = 0;
+    while (fa * fb > 0 && tb < tMax) {
+        sb *= 2;
+        tb = ta + sb;
+        fb = f(tb);
+    }
+
+    if (fa * fb > 0) return false;
+
+    if (verbosity >= 1)
+        std::cout << ">>> initial bounds: [ " << ta << ", " << tb << " ]"
+                  << std::endl;
+
+    int iter = 0;
+
+    for (; iter < 100; iter++) {
+        T tc = ta + (tb - ta) / 2.;
+        T fc = f(tc);
+
+        T3 grad_f;
+        if (params.use_grad_termination) {
+            T3 pos = fma(ray_P, tc, ray_D);
+            grad_f = evaluateGyroidGradient(pos, scale);
+        }
+
+        if (distanceToLevelset(fc, 0, grad_f) < params.epsilon) {
+            T3 pos   = fma(ray_P, tc, ray_D);
+            T val    = evaluateGyroid(pos, scale);
+            *isect_t = tc;
+            *isect_u = val;
+            *isect_v = ((T)iter) / ((T)params.max_iterations);
+            return true;
+        }
+
+        // if (tb - ta < params.epsilon * params.epsilon) break;
+
+        if (fa * fc < 0) { // intersection in first interfal
+            tb = tc;
+            fb = fc;
+        } else { // intersection in second interfal
+            ta = tc;
+            fa = fc;
+        }
+
+        if (verbosity >= 1) {
+            auto pr    = std::setprecision(4);
+            double fpi = 4. * M_PI;
+            double dt  = tb - ta;
+            std::cout << std::setfill(' ') << std::setw(3) << iter
+                      << "| ta = " << std::setw(8) << std::fixed << pr << ta
+                      << "  tb = " << std::setw(8) << std::fixed << pr << tb
+                      << "  δt = " << std::setw(8) << std::fixed << pr << dt
+                      << "  fa = " << std::setw(8) << std::fixed << pr << fa
+                      << "  fb = " << std::setw(8) << std::fixed << pr << fb
+                      << std::endl;
+        }
+    }
+
+    return false;
+}
+
+template <typename T>
+interval<T> interval_loop_solid_angle(const packed_float3* pts, uint iStart,
+                                      uint N, const i_vec3<T>& x,
+                                      bool use_quick_triangulation = false) {
+
+    auto diff_f = [](const float3& p, const i_vec3<T>& x) -> i_vec3<T> {
+        return {(T)p.x - x.x, (T)p.y - x.y, (T)p.z - x.z};
+    };
+
+    // compute the vectors xp from the evaluation point x
+    // to all the polygon vertices, and their lengths Lp
+    std::vector<i_vec3<T>> xp;
+    xp.reserve(N + 1);
+    std::vector<interval<T>> Lp;
+    Lp.reserve(N + 1);
+    for (uint i = 0; i < N + 1; i++) { // center = pts[N]
+        xp.push_back(diff_f(pts[iStart + i], x));
+        Lp.push_back(iLen(xp[i]));
+    }
+
+    // Iterate over triangles used to triangulate the polygon
+    i_cplx<T> running_angle{{1., 1.}, {0., 0.}};
+    uint start = use_quick_triangulation ? 2 : 0;
+    for (uint i = start; i < N; i++) {
+        int a = i;
+        int b = (i + 1) % N;
+        int c = N;
+
+        i_vec3<T> n = iCross(xp[a], xp[b]);
+
+        // Add the solid angle of this triangle to the total
+        i_cplx<T> tri_angle{Lp[a] * Lp[b] * Lp[c] + iDot(xp[a], xp[b]) * Lp[c] +
+                                iDot(xp[b], xp[c]) * Lp[a] +
+                                iDot(xp[a], xp[c]) * Lp[b],
+                            iDot(xp[c], n)};
+        running_angle *= tri_angle;
+
+        // normalize complex number every so often
+        // if (i % 5 == 0) running_angle /= std::abs(running_angle);
+    }
+
+    return static_cast<T>(2.) * iArg(running_angle);
+}
+
+template <typename T>
+interval<T>
+interval_solid_angle(const packed_float3* pts, const packed_uint3* loops,
+                     uint globalStart, const std::vector<uint>& polygonLoops,
+                     const i_vec3<T>& x, bool use_quick_triangulation = false) {
+    interval<T> omega = {0, 0};
+    for (uint iL : polygonLoops) {
+        uint iStart = loops[iL].x - globalStart;
+        uint N      = loops[iL].y;
+
+        omega = omega + interval_loop_solid_angle<T>(pts, iStart, N, x,
+                                                     use_quick_triangulation);
+    }
+
+    return omega;
+}
+
+template <typename T>
+// Interval arithmetic intersection function, taken from
+// https://www.shadertoy.com/view/7tKfz1 by https://www.shadertoy.com/user/fad
+
+// Performs a depth-first search of the ray's t domain, descending if the
+// current segment possibly contains an intersection. Once the max depth is
+// reached, if there's still an intersection in the segment and it is also
+// considered continous, then it is counted as an intersection and returned.
+ccl_device bool
+interval_intersect_T(const solid_angle_intersection_params& params,
+                     ccl_private float* isect_u, ccl_private float* isect_v,
+                     ccl_private float* isect_t, float* t_opt = nullptr) {
+
+    T epsilon        = static_cast<T>(params.epsilon);
+    T frequency      = static_cast<T>(params.frequency);
+    T levelset       = static_cast<T>(params.levelset);
+    T shift          = 4. * M_PI;
+    uint globalStart = params.loops[0].x;
+
+    // Note: treat all loops as polygons (I don't want to think about interval
+    // arithmetic for elliptic integrals)
+    std::vector<uint> polygonLoops;
+    for (uint i = 0; i < params.n_loops; i++) polygonLoops.push_back(i);
+
+    auto i3_from_float3 = [](const float3& v) -> i_vec3<T> {
+        return {{v.x, v.x}, {v.y, v.y}, {v.z, v.z}};
+    };
+    i_vec3<T> ro = i3_from_float3(params.ray_P);
+    i_vec3<T> rd = i3_from_float3(params.ray_D);
+
+    T tMin = static_cast<T>(params.ray_tmin);
+    T tMax = static_cast<T>(params.ray_tmax);
+
+    // Precision:
+    // The amount of times to recursively subdivide the ray.
+    const int maxDepth = 10;
+
+    // Discontinuity Tolerance:
+    // If the interval returned by the implicit function over a section of the
+    // ray has a width bigger than or equal to discontinuityTolerance, that
+    // section is counted as containing a discontinuity and is not counted as an
+    // intersection. It can be set to INFINITY if the surface is known to be
+    // continous.
+    const T discontinuityTolerance =
+        5000.0 * (tMax - tMin) / std::pow(2.0, T(maxDepth - 1));
+
+    if (maxDepth < 1) return false;
+
+    auto scalar_f = [&](T t) -> T {
+        std::array<T, 3> x{ro.x.l + t * rd.x.l, //
+                           ro.y.l + t * rd.y.l, //
+                           ro.z.l + t * rd.z.l};
+        std::array<T, 3> ignore_grad;
+        return glsl_mod(polygon_solid_angle(
+                            params.pts, params.loops, globalStart, polygonLoops,
+                            x, params.solid_angle_formula, &ignore_grad, 3,
+                            params.use_quick_triangulation),
+                        static_cast<T>(4. * M_PI));
+    };
+    // Debug sphere
+    // levelset        = 1.;
+    auto interval_f = [&](const i_vec3<T>& x) -> interval<T> {
+        // return x.x * x.x + x.y * x.y + x.z * x.z; // Debug sphere
+        interval<T> omega = interval_solid_angle(
+            params.pts, params.loops, globalStart, polygonLoops, x,
+            params.use_quick_triangulation);
+        return iMod(omega, static_cast<T>(4. * M_PI));
+    };
+
+    T tRange  = tMax - tMin;
+    int depth = 0;
+    int pos   = 0;
+
+    while (true) {
+        // Calculate the current t domain at this location in the tree
+        T size         = T(1 << depth);
+        interval<T> ti = {tMin + tRange * T(pos) / size,
+                          tMin + tRange * T(pos + 1) / size};
+        // Find the bounding box of the ray segment and use it to calculate an
+        // interval of possible values for f
+        interval<T> fi = interval_f(ro + (ti * rd));
+
+        if (t_opt && (ti.l <= *t_opt && *t_opt <= ti.u)) {
+            if (fi.u < levelset || fi.l > levelset) {
+                std::cout << "Error: Interval [ " << std::setw(8) << ti.l
+                          << " , " << std::setw(8) << ti.u << " ] has bounds [ "
+                          << std::setw(8) << fi.l << " , " << std::setw(8)
+                          << fi.u << " ]" << std::endl;
+                std::cout << "  but f(" << *t_opt << ") = " << scalar_f(*t_opt)
+                          << std::endl;
+                std::cout << "  levelset = " << levelset << std::endl;
+
+                size_t ni = 10;
+                for (size_t i = 0; i < ni; i++) {
+                    T s = ((T)i) / ((T)ni - 1.);
+                    T t = (1 - s) * ti.l + s * ti.u;
+                    std::cout << "        f(" << std::setw(i) << t
+                              << ") = " << scalar_f(t) << std::endl;
+                }
+            } else {
+                std::cout << "Okay!: Interval [ " << std::setw(8) << ti.l
+                          << " , " << std::setw(8) << ti.u << " ] has bounds [ "
+                          << std::setw(8) << fi.l << " , " << std::setw(8)
+                          << fi.u << " ]" << std::endl;
+                std::cout << "  and f(" << *t_opt << ") = " << scalar_f(*t_opt)
+                          << std::endl;
+                std::cout << "  levelset = " << levelset << std::endl;
+            }
+        }
+
+        if (fi.u < levelset || levelset <= fi.l || depth == maxDepth - 1) {
+            if (fi.l <= levelset && levelset <= fi.u &&
+                fi.u - fi.l < discontinuityTolerance) {
+                // We are at a leaf of the tree and there appears to be an
+                // intersection, so return it
+                T t     = (ti.l + ti.u) / 2.0;
+                T omega = scalar_f(t);
+                T val   = glsl_mod(omega, static_cast<T>(4. * M_PI));
+
+                if (std::abs(val - levelset) > omega) return false;
+
+                *isect_t = t;
+                *isect_u = val / static_cast<T>(4. * M_PI);
+                *isect_v = ((T)depth) / ((T)maxDepth);
+                return true;
+            }
+
+            // The segment of the ray this node of the tree represents
+            // definitely does not contain any intersections, so don't descend
+            // into its children and instead move onto the next node in the DFS
+            while (pos % 2 == 1) {
+                --depth;
+                pos /= 2;
+            }
+
+            ++pos;
+
+            if (depth == 0 && pos == 1) {
+                // We are back at the root of the tree after having searched the
+                // entire tree, so break out of the loop
+                break;
+            }
+
+            continue;
+        }
+
+        // Descend the tree to look for possible intersections
+        ++depth;
+        pos *= 2;
+    }
+
+    // There were no intersections
+    return false;
 }
