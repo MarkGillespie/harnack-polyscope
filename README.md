@@ -2,7 +2,7 @@
 
 This Rep contains some C++ experiments from our [Ray Tracing Harmonic Functions](https://markjgillespie.com/Research/harnack-tracing/index.html) paper. It was mostly used to debug code that I wrote for our [Blender implementation](https://github.com/MarkGillespie/harnack-blender), but may be useful on its own. But be warned: this code is messy research code hacked together while running experiments on a deadline. So feel free to reach out if you have problems using it.
 
-![Screenshot of points sampled on a nonplanar polygon in ourUI](images/example.jpt)
+![Screenshot of points sampled on a nonplanar polygon in ourUI](images/example.jpg)
 
 ## Building and Running
 On mac/linux, you can set up this project with the following commands.
