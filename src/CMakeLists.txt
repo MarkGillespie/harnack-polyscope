@@ -16,6 +16,8 @@ add_executable(
 target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 # borrow args.hxx directly from polyscope
 target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../deps/polyscope/deps/args/")
+target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../deps/polyscope/deps/MarchingCubeCpp/include")
+target_include_directories(run PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../deps/polyscope/deps/stb/")
 target_link_libraries(run polyscope geometry-central)
 
 target_include_directories(run PUBLIC ${FCPW_EIGEN_INCLUDES})

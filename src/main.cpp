@@ -1,8 +1,16 @@
 #include "geometrycentral/surface/simple_polygon_mesh.h"
+#include "geometrycentral/utilities/utilities.h"
+
+#include "polyscope/color_management.h" // getNextUniqueColor();
 #include "polyscope/curve_network.h"
 #include "polyscope/point_cloud.h"
 #include "polyscope/polyscope.h"
+#include "polyscope/screenshot.h" // saveImage
 #include "polyscope/surface_mesh.h"
+#include "polyscope/volume_grid.h"
+
+#define MC_CPP_USE_DOUBLE_PRECISION
+#include "MarchingCube/MC.h"
 
 #include "fcpw/fcpw.h"
 
@@ -15,7 +23,9 @@
 #include "generalized_barycentric_coordinates.h"
 #include "geometry_utils.h"
 #include "harnack.h"
+#include "spherical_harmonics.h"
 #include "utils.h"
+
 
 using namespace geometrycentral;
 using namespace geometrycentral::surface;
@@ -24,8 +34,8 @@ using namespace geometrycentral::surface;
 
 float tmin = 0, tmax = 10, epsilon = .001;
 int max_iterations        = 2500;
-int resolution_x          = 1;
-int resolution_y          = 1;
+int resolution_x          = 50;
+int resolution_y          = 50;
 bool use_grad_termination = true;
 bool use_overstepping     = false;
 bool use_extrapolation    = false;
@@ -35,6 +45,10 @@ bool intersect_with_mesh  = false;
 bool polygon_with_holes   = false;
 int loop_id               = 0;
 float target_levelset     = .5;
+
+float3 operator*(const float s, const float3& v) {
+    return {s * v.x, s * v.y, s * v.z};
+}
 
 static std::vector<const char*> tracing_mode_names{
     "Harnack Tracing", "Sphere Tracing", "Newton's Method", "Bisection Search",
@@ -52,6 +66,8 @@ std::vector<packed_float3> pts{float3{1, s, 1}, float3{-1, -s, 1},
                                float3{0, -1, 0}};
 std::vector<packed_uint3> loops{uint3{0, 4, 0}};
 
+std::map<std::string, SimplePolygonMesh> subdiv_meshes;
+
 typedef struct named_polygon {
     std::string name;
     std::vector<float3> pts;
@@ -59,6 +75,7 @@ typedef struct named_polygon {
     size_t cam_view;
 } named_polygon;
 const float r2                            = 1. / sqrt(2.);
+const float r32                           = sqrt(3.) / 2.;
 std::vector<named_polygon> named_polygons = {
     {"default",
      {float3{1, s, 1}, float3{-1, -s, 1}, float3{-1, s, -1}, float3{1, -s, -1},
@@ -103,7 +120,55 @@ std::vector<named_polygon> named_polygons = {
       float3{0, 0, 0}},
      {uint3{0, 8, 0}},
      4},
+    {"nice_nonplanar_hexagon",
+     {float3{1.0, 0, +0.0}, 1.2f * float3{.5, .75, r32}, //
+      float3{-.5, 0, +r32}, 1.2f * float3{-1, .75, 0},   //
+      float3{-.5, 0, -r32}, 1.2f * float3{.5, .75, -r32},
+      // center
+      float3{0, 0, 0}},
+     {uint3{0, 6, 0}},
+     4},
 };
+
+polyscope::CurveNetwork* drawPolygon(const std::vector<float3>& pts,
+                                     const std::vector<uint3>& loops) {
+    std::vector<float3> used_pts;
+    std::vector<int> new_id(pts.size(), -1);
+    std::vector<std::array<size_t, 2>> polygon_segments;
+    for (size_t iL = 0; iL < loops.size(); iL++) {
+        const uint3& loop = loops[iL];
+        for (size_t iPt = 0; iPt < loop.y; iPt++) {
+            size_t i = loop.x + iPt;
+            size_t j = loop.x + (iPt + 1) % loop.y;
+
+            if (new_id[i] < 0) {
+                new_id[i] = used_pts.size();
+                used_pts.push_back(pts[i]);
+            }
+            if (new_id[j] < 0) {
+                new_id[j] = used_pts.size();
+                used_pts.push_back(pts[j]);
+            }
+
+            polygon_segments.push_back(
+                std::array<size_t, 2>{(size_t)new_id[i], (size_t)new_id[j]});
+        }
+    }
+    return polyscope::registerCurveNetwork("polygon", used_pts,
+                                           polygon_segments);
+}
+void select_named_polygon(std::string name) {
+    for (const named_polygon& polygon : named_polygons) {
+        if (name == polygon.name) {
+            pts   = polygon.pts;
+            loops = polygon.loops;
+            drawPolygon(pts, loops);
+            return;
+        }
+    }
+    std::cout << "Err, failed to find a polygon named '" << name << "'"
+              << vendl;
+}
 
 void construct_approaching_circles() {
     std::vector<double> Ts{.2, .3, .455, .5, .7};
@@ -263,13 +328,16 @@ std::string tracing_mode;
 std::vector<convergence_statistics> pixel_convergence_statistics;
 
 float3 to_float3(glm::vec3 v) { return make_float3(v.x, v.y, v.z); }
-glm::vec3 to_vec3(float3 v) { return glm::vec3{v.x, v.y, v.z}; }
 
-double evaluate_solid_angle(glm::vec3 x, size_t solid_angle_formula) {
+double evaluate_solid_angle_arr(const std::array<double, 3>& x,
+                                size_t solid_angle_formula) {
     uint globalStart = loops[0].x;
-    return polygon_solid_angle<double>(
-        pts.data(), loops.data(), globalStart, {0}, {x[0], x[1], x[2]},
-        solid_angle_formula, nullptr, 0, false, 1);
+    return polygon_solid_angle<double>(pts.data(), loops.data(), globalStart,
+                                       {0}, x, solid_angle_formula, nullptr, 3,
+                                       false, 1);
+}
+double evaluate_solid_angle(glm::vec3 x, size_t solid_angle_formula) {
+    return evaluate_solid_angle_arr({x[0], x[1], x[2]}, solid_angle_formula);
 }
 
 bool intersect(glm::vec3 ro, glm::vec3 rd, float* t = nullptr,
@@ -1010,17 +1078,200 @@ void export_polygons_to_shadertoy() {
     polyscope::view::setViewToCamera(prev_params);
 }
 
-polyscope::CurveNetwork* drawPolygon(const std::vector<float3>& pts,
-                                     const std::vector<uint3>& loops) {
-    std::vector<std::array<size_t, 2>> polygon_segments;
-    for (size_t iL = 0; iL < loops.size(); iL++) {
-        const uint3& loop = loops[iL];
-        for (size_t iPt = 0; iPt < loop.y; iPt++) {
-            polygon_segments.push_back(std::array<size_t, 2>{
-                loop.x + iPt, loop.x + ((iPt + 1) % loop.y)});
+void write_polygons_to_obj() {
+    for (size_t iP = 0; iP < named_polygons.size(); iP++) {
+
+        std::string filename = named_polygons[iP].name + "_loops.obj";
+        std::ofstream out;
+        out.open(filename);
+
+        std::cout << "Writing " << filename << "...." << std::flush;
+
+        // Use full precision
+        out.precision(std::numeric_limits<double>::max_digits10);
+
+        for (const float3& p : named_polygons[iP].pts)
+            out << "v " << p.x << " " << p.y << " " << p.z << std::endl;
+
+        for (const uint3& l : named_polygons[iP].loops) {
+            out << "f ";
+            for (size_t iV = l.x; iV < l.x + l.y; iV++)
+                out << (iV + 1) << (iV + 1 < l.x + l.y ? " " : "");
+            out << std::endl;
+        }
+        out.close();
+
+        std::cout << "done" << std::endl;
+    }
+}
+
+void take_picturesque_steps(const SimplePolygonMesh& sphere_mesh,
+                            SimplePolygonMesh* slice_mesh = nullptr) {
+    select_named_polygon("nice_nonplanar_hexagon");
+
+    // // default quad
+    // glm::vec3 start = glm::vec3{0, 2, 2} * .5f;
+    // glm::vec3 dir   = normalize(-start - glm::vec3{0, 0.5, 0});
+
+    // nice nonplanar hexagon
+    glm::vec3 start = glm::vec3{-.5, 3, 2} * .4f;
+    glm::vec3 dir   = normalize(-start - glm::vec3{0, 0.1, 0});
+
+    // update min_d2, closest_point, and tangent if any closer point is present
+    // on loop iL. closest_point and tangent may be null, but min_d2 must not be
+    auto squared_distance_to_polygon_boundary =
+        [&](const glm::vec3& x) -> float {
+        float min_d2 = 1000.;
+        for (size_t iL = 0; iL < loops.size(); iL++) {
+            uint iStart = loops[iL].x;
+            uint N      = loops[iL].y;
+
+            // compute closest distance to each polygon line segment
+            for (uint i = 0; i < N; i++) {
+                glm::vec3 p1 = to_vec3(pts[iStart + i]);
+                glm::vec3 p2 = to_vec3(pts[iStart + (i + 1) % N]);
+                glm::vec3 m  = p2 - p1;
+                glm::vec3 v  = x - p1;
+                // dot = |a|*|b|cos(theta) * n, isolating |a|sin(theta)
+                float t  = fmin(fmax(dot(m, v) / dot(m, m), 0.), 1.);
+                float d2 = glm::length2(v - t * m);
+                // if closestPoint is not null, update it to track closest point
+                min_d2 = fmin(min_d2, d2);
+            }
+        }
+        return std::sqrt(min_d2);
+    };
+
+    float shift = 0.001, lo_bound = 0, up_bound = 4. * M_PI;
+    auto get_max_step = [&](float fx, float R) -> float {
+        float w    = (fx + shift) / (up_bound + shift);
+        float v    = (fx + shift) / (lo_bound + shift);
+        float lo_r = -R / 2 * (v + 2 - std::sqrt(v * v + 8 * v));
+        float up_r = R / 2 * (w + 2 - std::sqrt(w * w + 8 * w));
+
+        return std::min(lo_r, up_r);
+    };
+
+    std::vector<glm::vec3> query_points, directions;
+    std::vector<float> radii;
+
+    float t = 0;
+    for (size_t i = 0; i < 5; i++) {
+        glm::vec3 pos = start + t * dir;
+        float f = glsl_mod(evaluate_solid_angle(pos, 0) - 2. * M_PI, 4. * M_PI);
+        float R = squared_distance_to_polygon_boundary(pos);
+        float step = get_max_step(f, R);
+        WATCH(step);
+        query_points.push_back(pos);
+        radii.push_back(step);
+        directions.push_back(dir);
+        t += 1.6 * step;
+    }
+
+    auto psCloud = polyscope::registerPointCloud("query points", query_points);
+    // psCloud->addScalarQuantity("radii", radii);
+    psCloud->addVectorQuantity("dir", directions);
+
+    auto psRadii = polyscope::registerPointCloud("radii", query_points);
+    auto qRadius = psRadii->addScalarQuantity("r", radii);
+    psRadii->setPointRadiusQuantity(qRadius, false);
+
+    glm::vec3 pos = start + t * dir;
+    float f = glsl_mod(evaluate_solid_angle(pos, 0) - 2. * M_PI, 4. * M_PI);
+    while (abs(f) > epsilon && abs(4. * M_PI - f) > epsilon &&
+           query_points.size() < 100) {
+        pos     = start + t * dir;
+        f       = glsl_mod(evaluate_solid_angle(pos, 0) - 2. * M_PI, 4. * M_PI);
+        float R = squared_distance_to_polygon_boundary(pos);
+        float step = get_max_step(f, R);
+        query_points.push_back(pos);
+        radii.push_back(step);
+        directions.push_back(dir);
+        t += 1.6 * step;
+    }
+    WATCH(query_points.size());
+
+    psCloud = polyscope::registerPointCloud("query points (all)", query_points);
+    // psCloud->addScalarQuantity("radii", radii);
+    psCloud->addVectorQuantity("dir", directions);
+    psCloud->setEnabled(false);
+
+    psRadii = polyscope::registerPointCloud("radii (all)", query_points);
+    qRadius = psRadii->addScalarQuantity("r", radii);
+    psRadii->setPointRadiusQuantity(qRadius, false);
+    psRadii->setEnabled(false);
+
+    // build mesh of spheres
+    SimplePolygonMesh path_spheres;
+    for (size_t iS = 0; iS < query_points.size(); iS++) {
+        Vector3 p = to_gc(query_points[iS]);
+        double r  = radii[iS];
+        size_t n  = path_spheres.vertexCoordinates.size();
+        for (const Vector3& v : sphere_mesh.vertexCoordinates)
+            path_spheres.vertexCoordinates.push_back(p + r * v);
+        for (const std::vector<size_t>& polygon : sphere_mesh.polygons) {
+            path_spheres.polygons.push_back({});
+            for (size_t iV : polygon)
+                path_spheres.polygons.back().push_back(iV + n);
         }
     }
-    return polyscope::registerCurveNetwork("polygon", pts, polygon_segments);
+    path_spheres.writeMesh("path_spheres.obj");
+
+    polyscope::registerSurfaceMesh(
+        "radii (mesh)", path_spheres.vertexCoordinates, path_spheres.polygons);
+
+    if (slice_mesh) {
+        // slice plane
+        glm::vec3 o  = to_vec3(slice_mesh->vertexCoordinates[0]);
+        glm::vec3 dx = to_vec3(slice_mesh->vertexCoordinates[1]) - o;
+        glm::vec3 dy = to_vec3(slice_mesh->vertexCoordinates[2]) - o;
+
+        std::cout << "o: " << o << vendl;
+        std::cout << "dx: " << dx << vendl;
+        std::cout << "dy: " << dy << vendl;
+
+        polyscope::registerSurfaceMesh(
+            "slice plane", slice_mesh->vertexCoordinates, slice_mesh->polygons);
+
+        size_t N       = 2000;
+        int n_channels = 3;
+
+        std::vector<unsigned char> pixels;
+        pixels.reserve(n_channels * N * N);
+
+        for (size_t iY = 0; iY < N; iY++) {
+            float y = 1 - ((float)iY) / ((float)N - 1.);
+            for (size_t iX = 0; iX < N; iX++) {
+                float x = ((float)iX) / ((float)N - 1.);
+
+                glm::vec3 p        = o + x * dx + y * dy;
+                double omega       = evaluate_solid_angle(p, 0);
+                double f           = glsl_mod(omega, 4. * M_PI) / (4. * M_PI);
+                unsigned int value = std::floor(f * 255.);
+                pixels.push_back((unsigned char)value);
+                pixels.push_back((unsigned char)value);
+                pixels.push_back((unsigned char)value);
+            }
+        }
+
+        polyscope::saveImage("slice_texture.png", pixels.data(), N, N,
+                             n_channels);
+    }
+}
+
+void write_to_file(std::string filename, polyscope::SurfaceMesh* mesh) {
+    std::vector<Vector3> positions;
+    for (const glm::vec3& v : mesh->vertexPositions.data)
+        positions.push_back(Vector3{v.x, v.y, v.z});
+    const std::vector<uint32_t>& fs = mesh->triangleVertexInds.data;
+    std::vector<std::vector<size_t>> faceVertexList;
+    for (size_t iF = 0; iF < fs.size(); iF += 3) {
+        faceVertexList.push_back(std::vector<size_t>{
+            (size_t)fs[iF], (size_t)fs[iF + 1], (size_t)fs[iF + 2]});
+    }
+
+    SimplePolygonMesh smp(faceVertexList, positions);
+    smp.writeMesh(filename);
 }
 
 // A user-defined callback, for creating control panels (etc)
@@ -1316,9 +1567,6 @@ void myCallback() {
                     for (size_t iB = 0; iB < loop_b.y; iB++)
                         pts_b.push_back(to_vec3(pts[loop_b.x + iB]));
 
-                    // HACK : TKTKTKTKT : what's the deal with boundary loop
-                    // orientations? why do solid angle and minimal surfaces
-                    // disagree?
                     for (glm::vec3& p_b : pts_b) p_b.y = 2. - p_b.y;
 
                     double area_a, area_b;
@@ -1394,8 +1642,266 @@ void myCallback() {
                 }
             }
         }
+        if (ImGui::Button("Save All Polygons")) {
+            for (size_t iP = 0; iP < named_polygons.size(); iP++) {
+                display_polygon(iP);
+                std::string polygon_name = named_polygons[iP].name;
+
+                // write loops
+                std::string loops_name =
+                    "nonplanar_polygon_meshes/" + polygon_name + "--loops.obj";
+
+                std::ofstream out;
+                out.open(loops_name);
+
+                // Use full precision
+                out.precision(std::numeric_limits<double>::max_digits10);
+
+                for (const packed_float3& p : pts) {
+                    out << "v " << p.x << " " << p.y << " " << p.z << std::endl;
+                }
+
+                for (const uint3& l : loops) {
+                    out << "l";
+                    for (uint iP = 0; iP < l.y; iP++) {
+                        out << " " << (1 + l.x + iP);
+                    }
+                    out << std::endl;
+                }
+                out.close();
+
+                size_t nL = named_polygons[iP].loops.size();
+                if (nL == 2) {
+                    // special case where we only do minimal surfaces
+                    polyscope::screenshot(polygon_name + "--outline.png");
+
+                    // first try optimizing boundary components separately
+                    const std::vector<float3>& pts = named_polygons[iP].pts;
+                    uint3 loop_a = named_polygons[iP].loops[0];
+                    uint3 loop_b = named_polygons[iP].loops[1];
+                    std::vector<glm::vec3> pts_a, pts_b;
+                    for (size_t iA = 0; iA < loop_a.y; iA++)
+                        pts_a.push_back(to_vec3(pts[loop_a.x + iA]));
+                    for (size_t iB = 0; iB < loop_b.y; iB++)
+                        pts_b.push_back(to_vec3(pts[loop_b.x + iB]));
+
+                    for (glm::vec3& p_b : pts_b) p_b.y = 2. - p_b.y;
+
+                    double area_a, area_b;
+                    std::vector<std::array<glm::vec3, 3>> side_a =
+                        minimalSurfaceArea(pts_a, &area_a);
+                    std::vector<std::array<glm::vec3, 3>> side_b =
+                        minimalSurfaceArea(pts_b, &area_b);
+
+                    double area_tube;
+                    std::vector<std::array<glm::vec3, 3>> tube;
+                    try {
+                        tube = minimalSurfaceArea(pts_a, pts_b, &area_tube);
+                    } catch (std::logic_error& e) {
+                        // if mesh degenerates, set big area so we choose
+                        // the other option
+                        area_tube = 999;
+                    }
+
+                    polyscope::SurfaceMesh* psMesh;
+                    if (area_tube < area_a + area_b) {
+                        psMesh = build_comparison_mesh("minimal", tube);
+                    } else {
+                        side_a.insert(side_a.end(), side_b.begin(),
+                                      side_b.end());
+                        psMesh = build_comparison_mesh("minimal", side_a);
+                    }
+                    write_to_file("nonplanar_polygon_meshes/" + polygon_name +
+                                      "--minimal.obj",
+                                  psMesh);
+
+                    continue;
+                } else if (nL > 2) {
+                    polyscope::warning("Minimal surfaces with >2 boundary "
+                                       "components not supported");
+                    continue;
+                }
+
+                auto psMesh =
+                    build_comparison_mesh("wachspress", wachpressInterpolate);
+                write_to_file("nonplanar_polygon_meshes/" + polygon_name +
+                                  "--wachspress.obj",
+                              psMesh);
+
+                psMesh =
+                    build_comparison_mesh("mean_value", meanValueInterpolate);
+                write_to_file("nonplanar_polygon_meshes/" + polygon_name +
+                                  "--mean_value.obj",
+                              psMesh);
+
+                psMesh = build_comparison_mesh("astrid", astridInterpolate);
+                write_to_file("nonplanar_polygon_meshes/" + polygon_name +
+                                  "--astrid.obj",
+                              psMesh);
+
+                psMesh = build_comparison_mesh("minimal", minimalSurface);
+                write_to_file("nonplanar_polygon_meshes/" + polygon_name +
+                                  "--minimal.obj",
+                              psMesh);
+
+                if (pts.size() == 4) {
+                    psMesh =
+                        build_comparison_mesh("bilinear", bilinearInterpolate);
+                    write_to_file("nonplanar_polygon_meshes/" + polygon_name +
+                                      "--bilinear.obj",
+                                  psMesh);
+                }
+            }
+        }
+        static polyscope::SurfaceMesh* psMesh;
+        if (ImGui::Button("Render just subdiv")) {
+            std::string polygon_name = named_polygons[selected_polygon].name;
+            SimplePolygonMesh subdiv_mesh = subdiv_meshes[polygon_name];
+            psMesh                        = polyscope::registerSurfaceMesh(
+                "subdiv", subdiv_mesh.vertexCoordinates, subdiv_mesh.polygons);
+            psMesh->setTransparency(0.75);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Next Color")) {
+            psMesh->setSurfaceColor(polyscope::getNextUniqueColor());
+        }
         if (ImGui::Button("Export Polygons to ShaderToy")) {
             export_polygons_to_shadertoy();
+        }
+        if (ImGui::Button("Write Polygon (boundary loops) to OBJ")) {
+            write_polygons_to_obj();
+        }
+        if (ImGui::Button("Print Debug Vectors")) {
+            std::vector<glm::vec3> vecs{
+                {1.1, 2.2, 3.3}, {.8, 1.3, .6}, {3.8, -1.2, 1.6}};
+
+            for (const auto& v : vecs) {
+                std::cout << v << " -> " << evaluate_solid_angle(v, 0) << vendl;
+            }
+        }
+        if (ImGui::Button("Marching Cubes")) {
+
+            // x goes from -wx/2 to wx/2, etc
+            double wx = 2.25, wy = 2.25, wz = 2.25;
+
+            size_t nx = 50;
+            size_t ny = nx, nz = nx;
+            std::vector<glm::vec3> cloud_pts;
+
+            std::vector<double> field_values;
+            field_values.reserve(nx * ny * nz);
+            for (size_t iZ = 0; iZ < nz; iZ++) {
+                float z = ((float)iZ) / ((float)(nz - 1)) * wz - wz / 2.;
+                for (size_t iY = 0; iY < ny; iY++) {
+                    float y = ((float)iY) / ((float)(ny - 1)) * wy - wy / 2.;
+                    for (size_t iX = 0; iX < nx; iX++) {
+                        float x =
+                            ((float)iX) / ((float)(nx - 1)) * wx - wx / 2.;
+                        field_values.push_back(glsl_mod(
+                            evaluate_solid_angle({x, y, z}, 0), 4. * M_PI));
+                        cloud_pts.push_back({x, y, z});
+                    }
+                }
+            }
+
+            // auto psCloud =
+            //     polyscope::registerPointCloud("sample grid", cloud_pts);
+            // psCloud->addScalarQuantity("solid angle", field_values);
+
+            MC::mcMesh mesh;
+            MC::marching_cube(field_values.data(), 2. * M_PI, nx, ny, nz, mesh);
+
+            // Transform the result to be aligned with our volume's spatial
+            // layout
+            glm::vec3 scale{wx / (nx - 1), wy / (ny - 1), wz / (nz - 1)};
+            glm::vec3 bound_min{-wx / 2., -wy / 2., -wz / 2.};
+            for (auto& p : mesh.vertices) p = p * scale + bound_min;
+
+            std::vector<std::vector<size_t>> face_vertex_indices;
+            for (size_t iI = 0; iI < mesh.indices.size(); iI += 3)
+                face_vertex_indices.push_back({mesh.indices[iI],
+                                               mesh.indices[iI + 1],
+                                               mesh.indices[iI + 2]});
+
+            polyscope::registerSurfaceMesh("marching cubes", mesh.vertices,
+                                           face_vertex_indices);
+
+            SimplePolygonMesh gc_mesh;
+            gc_mesh.vertexCoordinates.reserve(mesh.vertices.size());
+            for (const glm::vec3& p : mesh.vertices)
+                gc_mesh.vertexCoordinates.push_back(to_gc(p));
+            gc_mesh.polygons = face_vertex_indices;
+            gc_mesh.writeMesh("marching_cubes.obj");
+        }
+
+        static int n_sides = 10, n_queries = 1000;
+        ImGui::DragInt("n_sides", &n_sides, 10, 1, 1000);
+        ImGui::DragInt("n_queries", &n_queries, 10, 1, 100000);
+        if (ImGui::Button("Compare elliptic integral")) {
+            float R = 1;
+            std::vector<float3> disk_pts;
+            std::vector<uint3> disk_loops{{0, (uint)n_sides, 0}};
+            for (size_t iP = 0; iP < n_sides; iP++) {
+                double s = ((double)iP) / ((double)n_sides) * 2. * M_PI;
+                disk_pts.push_back(make_float3(R * cos(s), 0, R * sin(s)));
+            }
+
+            std::vector<std::array<double, 3>> queryPoints;
+            for (size_t iQ = 0; iQ < n_queries; iQ++) {
+                queryPoints.push_back(
+                    {randomNormal(), randomNormal(), randomNormal()});
+            }
+
+            pts   = disk_pts;
+            loops = disk_loops;
+            drawPolygon(pts, loops);
+
+            polyscope::registerPointCloud("Query points", queryPoints);
+
+            std::array<double, 3> disk_center{0, 0, 0};
+            std::array<double, 3> disk_normal{0, 1, 0};
+            double disk_radius  = R;
+            double ellint_start = std::clock();
+            double val;
+            for (const std::array<double, 3>& q : queryPoints) {
+                val = disk_solid_angle(q, (std::array<double, 3>*)nullptr,
+                                       disk_center, disk_normal, disk_radius);
+            }
+            double ellint_duration =
+                (std::clock() - ellint_start) / (double)CLOCKS_PER_SEC;
+
+            std::vector<uint> polygonLoops{0};
+            double polygon_start = std::clock();
+            for (const std::array<double, 3>& q : queryPoints) {
+                val = triangulated_solid_angle(
+                    pts.data(), loops.data(), 0, polygonLoops, q,
+                    (std::array<double, 3>*)nullptr, 3, false);
+            }
+            double polygon_duration =
+                (std::clock() - polygon_start) / (double)CLOCKS_PER_SEC;
+
+            std::cout << "avg elliptic integral time: "
+                      << (ellint_duration / (double)n_queries) << vendl;
+            std::cout << "          avg polygon time: "
+                      << (polygon_duration / (double)n_queries) << vendl;
+        }
+        if (ImGui::Button("Evaluate at center of mass")) {
+            glm::vec3 center{0, 0, 0};
+            float total_length = 0;
+            for (uint i = 0; i < loops[0].y; i++) {
+                uint j       = (i + 1) % loops[0].y;
+                glm::vec3 pi = to_vec3(pts[i]);
+                glm::vec3 pj = to_vec3(pts[j]);
+                float l      = glm::length(pi - pj);
+                center += l * (pi + pj) / 2.f;
+                total_length += l;
+            }
+            center /= total_length;
+            polyscope::registerPointCloud("Center",
+                                          std::vector<glm::vec3>{center});
+
+            std::cout << "omega(center) = " << evaluate_solid_angle(center, 0)
+                      << vendl;
         }
         ImGui::TreePop();
     }
@@ -1408,8 +1914,20 @@ int main(int argc, char** argv) {
     // Configure the argument parser
     args::ArgumentParser parser("Harnack debugger");
 
-    args::Positional<std::string> inputFilename(parser, "loop_file",
-                                                ".loops file to load.");
+    args::Positional<std::string> inputFilename(
+        parser, "loop_file", ".loops file or .obj file to load.");
+    args::Positional<std::string> slicePlane(
+        parser, "slice_plane_file",
+        ".obj file specifying a slice plane for the teaser.");
+    args::Flag filter(parser, "filter",
+                      "filter jump faces out of meshed level set",
+                      {'f', "filter"});
+    args::Flag teaser(parser, "teaser", "build didactic teaser image",
+                      {'t', "teaser"});
+    args::Flag draw_subdiv_meshes(parser, "draw_subdiv_meshes",
+                                  "draw subdivision meshes", {'s', "subdiv"});
+    args::Flag draw_harmonic_meshes(parser, "draw_harmonic_meshes",
+                                    "draw harmonic meshes", {'h', "harmonic"});
 
     // Parse args
     try {
@@ -1424,7 +1942,84 @@ int main(int argc, char** argv) {
     }
 
     construct_approaching_circles();
-    if (inputFilename) {
+    if (filter) {
+        if (!inputFilename) {
+            std::cout << "Error: you must provide an file to use --filter"
+                      << std::endl;
+            throw_verbose_runtime_error("missing input file");
+        }
+        SimplePolygonMesh mesh(args::get(inputFilename));
+
+
+        pts   = named_polygons[5].pts;
+        loops = named_polygons[5].loops;
+
+        // // use erase-remove to remove all faces where the solid angle at the
+        // // face center is not 2π
+        mesh.polygons.erase(
+            std::remove_if(
+                mesh.polygons.begin(), mesh.polygons.end(),
+                [&](const std::vector<size_t>& polygon) {
+                    Vector3 c{0, 0, 0}; // center
+                    for (size_t iV : polygon) {
+                        c += mesh.vertexCoordinates[iV];
+                    }
+                    c /= polygon.size();
+                    double val = evaluate_solid_angle({c.x, c.y, c.z}, 0);
+                    return abs(val - 2. * M_PI) > 1. &&
+                           abs(val + 2. * M_PI) > 1.;
+                }),
+            mesh.polygons.end());
+        mesh.stripUnusedVertices();
+        std::string nicename =
+            polyscope::guessNiceNameFromPath(args::get(inputFilename));
+        mesh.writeMesh(nicename + "_filtered.obj");
+        auto psMesh = polyscope::registerSurfaceMesh(
+            "filtered mesh", mesh.vertexCoordinates, mesh.polygons);
+
+        // std::vector<double> omegas;
+        // for (const std::vector<size_t>& polygon : mesh.polygons) {
+        //     Vector3 c{0, 0, 0}; // center
+        //     for (size_t iV : polygon) {
+        //         c += mesh.vertexCoordinates[iV];
+        //     }
+        //     c /= polygon.size();
+        //     double val = evaluate_solid_angle({c.x, c.y, c.z}, 0);
+        //     omegas.push_back(val);
+        // }
+        // psMesh->addFaceScalarQuantity("solid angle", omegas);
+
+    } else if (teaser) {
+        if (inputFilename) {
+            SimplePolygonMesh sphere_mesh(args::get(inputFilename));
+            if (slicePlane) {
+                SimplePolygonMesh slice_mesh(args::get(slicePlane));
+                take_picturesque_steps(sphere_mesh, &slice_mesh);
+            } else {
+                take_picturesque_steps(sphere_mesh);
+            }
+        } else {
+            std::cout << "Please pass a sphere mesh as input" << std::endl;
+        }
+    } else if (draw_subdiv_meshes) {
+        std::string subdiv_path = args::get(inputFilename);
+        std::vector<std::string> names{"nice_nonplanar_octagon",
+                                       "nonconvex_planar_octagon",
+                                       "nonconvex_nonplanar_octagon"};
+        for (std::string name : names) {
+            subdiv_meshes[name] =
+                SimplePolygonMesh(subdiv_path + name + "-subdiv.obj");
+        }
+    } else if (draw_harmonic_meshes) {
+        std::string harmonic_path = args::get(inputFilename);
+        std::vector<std::string> names{"nice_nonplanar_octagon",
+                                       "nonconvex_planar_octagon",
+                                       "nonconvex_nonplanar_octagon"};
+        for (std::string name : names) {
+            subdiv_meshes[name] =
+                SimplePolygonMesh(harmonic_path + name + "-harmonic.obj");
+        }
+    } else if (inputFilename) {
         load_loop_file(args::get(inputFilename));
         pts   = named_polygons.back().pts;
         loops = named_polygons.back().loops;

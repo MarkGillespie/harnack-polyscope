@@ -251,7 +251,6 @@ T triangulated_loop_solid_angle(const packed_float3* pts, uint iStart, uint N,
                                 std::array<T, 3>* grad, int grad_mode = 0,
                                 bool use_quick_triangulation = false) {
     using T3 = std::array<T, 3>;
-
     // compute the vectors xp from the evaluation point x
     // to all the polygon vertices, and their lengths Lp
     std::vector<T3> xp;
@@ -1446,7 +1445,7 @@ bisection_intersect_T(const solid_angle_intersection_params& params,
         T tc = ta + (tb - ta) / 2.;
         T fc = f(tc);
 
-        if (std::abs(fc) < params.epsilon || (false && (tb - ta < 1e-8))) {
+        if (std::abs(fc) < params.epsilon || (true && (tb - ta < 1e-8))) {
             T3 pos   = fma(ray_P, tc, ray_D);
             T omega  = total_solid_angle(pos, nullptr);
             T val    = glsl_mod(omega, static_cast<T>(4. * M_PI));
@@ -1772,7 +1771,6 @@ ccl_device bool newton_intersect_gyroid_T(
     ccl_private float* t_start = nullptr, acceleration_stats* stats = nullptr,
     int verbosity = 0) {
 
-    // TODO: clip to sphere
     using T3   = std::array<T, 3>;
     T epsilon  = static_cast<T>(params.epsilon);
     T scale    = 1. / static_cast<T>(params.frequency);
@@ -2058,7 +2056,7 @@ interval_intersect_T(const solid_angle_intersection_params& params,
 
     // Precision:
     // The amount of times to recursively subdivide the ray.
-    const int maxDepth = 10;
+    const int maxDepth = 14;
 
     // Discontinuity Tolerance:
     // If the interval returned by the implicit function over a section of the
@@ -2066,8 +2064,9 @@ interval_intersect_T(const solid_angle_intersection_params& params,
     // section is counted as containing a discontinuity and is not counted as an
     // intersection. It can be set to INFINITY if the surface is known to be
     // continous.
-    const T discontinuityTolerance =
-        5000.0 * (tMax - tMin) / std::pow(2.0, T(maxDepth - 1));
+    // const T discontinuityTolerance = 2000.0 * (tMax - tMin) / std::pow(2.0,
+    // T(maxDepth - 1));
+    const T discontinuityTolerance = std::numeric_limits<T>::infinity();
 
     if (maxDepth < 1) return false;
 
@@ -2133,19 +2132,145 @@ interval_intersect_T(const solid_angle_intersection_params& params,
             }
         }
 
-        if (fi.u < levelset || levelset <= fi.l || depth == maxDepth - 1) {
+        if (fi.u < levelset || levelset <= fi.l || depth == maxDepth - 1 ||
+            (fi.u - fi.l) < 2. * epsilon) {
             if (fi.l <= levelset && levelset <= fi.u &&
                 fi.u - fi.l < discontinuityTolerance) {
                 // We are at a leaf of the tree and there appears to be an
-                // intersection, so return it
+                // intersection, so return it if the function value is good
                 T t     = (ti.l + ti.u) / 2.0;
                 T omega = scalar_f(t);
                 T val   = glsl_mod(omega, static_cast<T>(4. * M_PI));
 
-                if (std::abs(val - levelset) > omega) return false;
+                if (true || std::abs(val - levelset) < epsilon) {
+                    *isect_t = t;
+                    *isect_u = val / static_cast<T>(4. * M_PI);
+                    *isect_v = ((T)depth) / ((T)maxDepth);
+                    return true;
+                }
+            }
+
+            // The segment of the ray this node of the tree represents
+            // definitely does not contain any intersections, so don't descend
+            // into its children and instead move onto the next node in the DFS
+            while (pos % 2 == 1) {
+                --depth;
+                pos /= 2;
+            }
+
+            ++pos;
+
+            if (depth == 0 && pos == 1) {
+                // We are back at the root of the tree after having searched the
+                // entire tree, so break out of the loop
+                break;
+            }
+
+            continue;
+        }
+
+        // Descend the tree to look for possible intersections
+        ++depth;
+        pos *= 2;
+    }
+
+    // There were no intersections
+    return false;
+}
+
+// Return the value of the gyroid at an evaluation point s*p,
+template <typename T>
+interval<T> intervalGyroid(const i_vec3<T>& p, T s) {
+    interval<T> x = s * p.x;
+    interval<T> y = s * p.y;
+    interval<T> z = s * p.z;
+    return iSin(x) * iCos(y) + iSin(y) * iCos(z) + iSin(z) * iCos(x);
+}
+
+template <typename T>
+// Interval arithmetic intersection function, taken from
+// https://www.shadertoy.com/view/7tKfz1 by https://www.shadertoy.com/user/fad
+
+// Performs a depth-first search of the ray's t domain, descending if the
+// current segment possibly contains an intersection. Once the max depth is
+// reached, if there's still an intersection in the segment and it is also
+// considered continous, then it is counted as an intersection and returned.
+ccl_device bool interval_intersect_gyroid_T(
+    const gyroid_intersection_params& params, ccl_private float* isect_u,
+    ccl_private float* isect_v, ccl_private float* isect_t,
+    float* t_opt = nullptr) {
+    using T3   = std::array<T, 3>;
+    T epsilon  = static_cast<T>(params.epsilon);
+    T scale    = 1. / static_cast<T>(params.frequency);
+    T levelset = static_cast<T>(params.levelset);
+
+    std::array<T, 3> ray_P = from_float3<T>(params.ray_P);
+    std::array<T, 3> ray_D = from_float3<T>(params.ray_D);
+
+    auto i3_from_float3 = [](const float3& v) -> i_vec3<T> {
+        return {{v.x, v.x}, {v.y, v.y}, {v.z, v.z}};
+    };
+    i_vec3<T> ro = i3_from_float3(params.ray_P);
+    i_vec3<T> rd = i3_from_float3(params.ray_D);
+
+    T ray_tmin = static_cast<T>(params.ray_tmin);
+    T ray_tmax = static_cast<T>(params.ray_tmax);
+    T radius   = static_cast<T>(params.R);
+
+    // check if ray intersects sphere. If so, store intersection times (tMin <
+    // tMax)
+    T tMin, tMax;
+    bool hit_sphere = intersect_sphere(ray_P, ray_D, radius, &tMin, &tMax);
+
+    // if we miss the sphere, there cannot be an intersection with the levelset
+    // within the sphere
+    if (!hit_sphere) return false;
+
+    // Precision:
+    // The amount of times to recursively subdivide the ray.
+    const int maxDepth = 20;
+
+    // Discontinuity Tolerance:
+    // If the interval returned by the implicit function over a section of the
+    // ray has a width bigger than or equal to discontinuityTolerance, that
+    // section is counted as containing a discontinuity and is not counted as an
+    // intersection. It can be set to INFINITY if the surface is known to be
+    // continous.
+    const T discontinuityTolerance = std::numeric_limits<T>::infinity();
+    // 1000.0 * (tMax - tMin) / std::pow(2.0, T(maxDepth - 1));
+
+    if (maxDepth < 1) return false;
+
+    auto interval_f = [&](const i_vec3<T>& x) -> interval<T> {
+        return intervalGyroid(x, scale);
+    };
+
+    T tRange  = tMax - tMin;
+    int depth = 0;
+    int pos   = 0;
+
+    while (true) {
+        // Calculate the current t domain at this location in the tree
+        T size         = T(1 << depth);
+        interval<T> ti = {tMin + tRange * T(pos) / size,
+                          tMin + tRange * T(pos + 1) / size};
+        // Find the bounding box of the ray segment and use it to calculate an
+        // interval of possible values for f
+        interval<T> fi = interval_f(ro + (ti * rd));
+
+        if (fi.u < levelset || levelset <= fi.l || depth == maxDepth - 1) {
+            if (fi.l <= levelset && levelset <= fi.u &&
+                fi.u - fi.l < discontinuityTolerance) {
+                // We are at a leaf of the tree and there appears to be an
+                // intersection, so return it if the function value is good
+                T t = (ti.l + ti.u) / 2.0;
+
+                std::array<T, 3> x = fma(ray_P, t, ray_D);
+
+                T val = evaluateGyroid(x, scale);
 
                 *isect_t = t;
-                *isect_u = val / static_cast<T>(4. * M_PI);
+                *isect_u = val;
                 *isect_v = ((T)depth) / ((T)maxDepth);
                 return true;
             }

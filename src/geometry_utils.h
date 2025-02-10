@@ -24,6 +24,7 @@ inline fcpw::Vector<3> to_fcpw(geometrycentral::Vector3 v) {
 inline geometrycentral::Vector3 to_gc(float3 v) { return {v.x, v.y, v.z}; }
 inline geometrycentral::Vector3 to_gc(glm::vec3 v) { return {v.x, v.y, v.z}; }
 inline glm::vec3 to_vec3(geometrycentral::Vector3 v) { return {v.x, v.y, v.z}; }
+inline glm::vec3 to_vec3(float3 v) { return {v.x, v.y, v.z}; }
 inline float3 to_float3(geometrycentral::Vector3 v) {
     return {(float)v.x, (float)v.y, (float)v.z};
 }
